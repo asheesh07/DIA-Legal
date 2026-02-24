@@ -1,0 +1,16 @@
+pytube
+pathlib
+Shutil
+WhisperX
+transformers
+torch
+cv2
+pytesseract
+diarization
+yt_dlp
+Lancedb
+faiss-cpu
+python-dotenv
+textwrap
+PIL
+huggingface_hub
