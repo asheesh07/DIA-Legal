@@ -1,6 +1,5 @@
 pytube
 pathlib
-Shutil
 WhisperX
 transformers
 torch
