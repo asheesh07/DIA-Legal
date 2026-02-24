@@ -331,4 +331,10 @@ Existing RAG systems chunk documents without preserving conversational structure
 
 This is an active research direction. The speaker-attributed retrieval mechanism, evaluation metrics for attribution faithfulness, and benchmark construction are areas of ongoing development.
 
+> ⚠️ **Active Development** — Core pipeline
+> is functional and deployed. Visual retrieval,
+> named speaker identification, and multi-case
+> dashboard are under active development.
+> Contributions and feedback welcome.
+
 ---
