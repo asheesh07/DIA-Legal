@@ -226,6 +226,8 @@ class MultiModalEmbedder:
                 texts.append(frame['ocr_text'])
             if frame.get('caption'):
                 texts.append(frame['caption'])
+        if not texts and chunks.get('text'):
+            texts.append(chunks['text'])
         return ' '.join(texts).strip()
             
     
