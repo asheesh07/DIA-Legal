@@ -12,3 +12,7 @@ lancedb
 faiss-cpu
 python-dotenv
 huggingface-hub
+pdfplumber
+reportlab
+faster-whisper
+pyannote.audio
