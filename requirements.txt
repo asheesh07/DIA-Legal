@@ -1,9 +1,9 @@
 gradio>=4.0.0
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.2.0+cpu
-transformers
-sentence-transformers
-numpy
+torch==2.4.0+cpu
+transformers>=4.40.0
+sentence-transformers>=3.0.0
+numpy<2.0
 opencv-python-headless
 Pillow
 pytesseract
