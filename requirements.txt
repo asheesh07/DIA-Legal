@@ -1,7 +1,6 @@
 gradio>=4.0.0
-fastapi
-uvicorn
-torch
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.2.0+cpu
 transformers
 sentence-transformers
 numpy
