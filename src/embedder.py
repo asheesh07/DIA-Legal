@@ -2,7 +2,6 @@ import numpy as np
 import torch
 from torch import no_grad
 from transformers import CLIPProcessor,CLIPModel
-from sentence_transformers import SentenceTransformer
 from PIL import Image
 class TextEmbedder:
     def __init__(self,model,batch_size,normalize):

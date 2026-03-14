@@ -11,7 +11,6 @@ class QueryRouter:
         else:
             mode = "evidence"
 
-        # Simplified query type detection
         if "when" in query_lower or "time" in query_lower:
             query_type = "temporal"
         else:

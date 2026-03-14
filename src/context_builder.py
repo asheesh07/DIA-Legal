@@ -173,6 +173,64 @@ class ContextBuilder:
                     break
 
         return decisive
+    
+    def _is_pdf_chunk(self, item) -> bool:
+        """PDF chunks have speaker=DOCUMENT and start=end=0.0"""
+        if item.structured_transcripts:
+            speaker = item.structured_transcripts[0].get("speaker", "")
+            if speaker == "DOCUMENT":
+                return True
+        return (
+            item.temporal.primary.start_time == 0.0 and
+            item.temporal.primary.end_time == 0.0
+        )
+
+    def _build_citation_ref(self, item) -> str:
+        """
+        Video:  [01:36 → 02:14]
+        PDF:    [Witness Statement · § Facts · pp.4-7]
+        """
+        if self._is_pdf_chunk(item):
+            meta          = getattr(item, "metadata", {})
+            source_type   = meta.get("source_type", "document")
+            section_title = meta.get("section_title", "")
+            page_start    = meta.get("page_span_start", 0)
+            page_end      = meta.get("page_span_end", 0)
+
+            label = self._source_type_label(source_type)
+            parts = [label]
+            if section_title:
+                parts.append(f"§ {section_title}")
+            if page_start and page_end:
+                page_str = (
+                    f"p.{page_start}" if page_start == page_end
+                    else f"pp.{page_start}-{page_end}"
+                )
+                parts.append(page_str)
+            return "[" + " · ".join(parts) + "]"
+        else:
+            s = item.temporal.primary.start_time
+            e = item.temporal.primary.end_time
+            sm, ss = int(s) // 60, int(s) % 60
+            em, es = int(e) // 60, int(e) % 60
+            return f"[{sm:02d}:{ss:02d} → {em:02d}:{es:02d}]"
+
+    def _source_type_label(self, source_type: str) -> str:
+        labels = {
+            "fir":               "FIR",
+            "witness_statement": "Witness Statement",
+            "court_order":       "Court Order",
+            "evidence":          "Evidence Report",
+            "charge_sheet":      "Charge Sheet",
+            "document":          "Document",
+            "video":             "Video",
+            "Youtube":           "Video",
+            "Local":             "Video",
+        }
+        return labels.get(
+            source_type,
+            source_type.replace("_", " ").title()
+        )
 
     # ============================================================
     # CONTEXT ASSEMBLY
@@ -183,29 +241,75 @@ class ContextBuilder:
         citation_map = {}
 
         for idx, e in enumerate(items, start=1):
-            item = e["item"]
-            citation_map[idx] = {
-                "chunk_ids": item.chunk_ids,
-                "case_id": item.case_id,
-                "start_time": item.temporal.primary.start_time,
-                "end_time": item.temporal.primary.end_time
-            }
-            header = (
-                f"[Block {idx}]\n"
-                f"Case ID: {item.case_id}\n"
-                f"Time Range: "
-                f"{item.temporal.primary.start_time:.2f}–"
-                f"{item.temporal.primary.end_time:.2f}\n"
-                f"{'-'*72}\n"
-            )
+            item   = e["item"]
+            is_pdf = self._is_pdf_chunk(item)
 
+            # ── Citation map ─────────────────────────────────────
+            if is_pdf:
+                meta = getattr(item, "metadata", {})
+                citation_map[idx] = {
+                    "chunk_ids":     item.chunk_ids,
+                    "case_id":       item.case_id,
+                    "source_type":   meta.get("source_type", "document"),
+                    "original_name": meta.get("original_name", ""),
+                    "section_title": meta.get("section_title", ""),
+                    "page_start":    meta.get("page_span_start", 0),
+                    "page_end":      meta.get("page_span_end", 0),
+                    "citation_ref":  self._build_citation_ref(item),
+                }
+            else:
+                citation_map[idx] = {
+                    "chunk_ids":  item.chunk_ids,
+                    "case_id":    item.case_id,
+                    "start_time": item.temporal.primary.start_time,
+                    "end_time":   item.temporal.primary.end_time,
+                    "citation_ref": self._build_citation_ref(item),
+                }
+
+            # ── Block header ─────────────────────────────────────
+            if is_pdf:
+                meta          = getattr(item, "metadata", {})
+                source_label  = self._source_type_label(
+                    meta.get("source_type", "document")
+                )
+                section_title = meta.get("section_title", "")
+                page_start    = meta.get("page_span_start", 0)
+                page_end      = meta.get("page_span_end", 0)
+                page_str = (
+                    f"p.{page_start}" if page_start == page_end
+                    else f"pp.{page_start}-{page_end}"
+                )
+                header = (
+                    f"[Block {idx}]\n"
+                    f"Source:  {source_label}\n"
+                    f"Section: {section_title}\n"
+                    f"Pages:   {page_str}\n"
+                    f"Case ID: {item.case_id}\n"
+                    f"{'-'*72}\n"
+                )
+            else:
+                header = (
+                    f"[Block {idx}]\n"
+                    f"Case ID: {item.case_id}\n"
+                    f"Time Range: "
+                    f"{item.temporal.primary.start_time:.2f}–"
+                    f"{item.temporal.primary.end_time:.2f}\n"
+                    f"{'-'*72}\n"
+                )
+
+            # ── Transcript / document text ────────────────────────
             transcript_section = []
             for seg in item.structured_transcripts:
-                text = seg.get("text")
-                if text:
-                    speaker = seg.get("speaker", "UNKNOWN")
+                text    = seg.get("text")
+                speaker = seg.get("speaker", "UNKNOWN")
+                if not text:
+                    continue
+                if is_pdf:
+                    # Documents have no timestamps or speakers
+                    transcript_section.append(text)
+                else:
                     start = seg.get("start_time")
-                    end = seg.get("end_time")
+                    end   = seg.get("end_time")
                     if start and end:
                         transcript_section.append(
                             f"[{start:.2f}-{end:.2f}] {speaker}: {text}"
@@ -215,22 +319,23 @@ class ContextBuilder:
                             f"{speaker}: {text}"
                         )
 
+            # ── Visual evidence (video only) ──────────────────────
             visual_section = []
-            for frame in item.structured_frames:
-                ts = frame.get("timestamp")
-                caption = frame.get("caption")
-                ocr = frame.get("ocr_text")
+            if not is_pdf:
+                for frame in item.structured_frames:
+                    ts      = frame.get("timestamp")
+                    caption = frame.get("caption")
+                    ocr     = frame.get("ocr_text")
+                    if caption:
+                        visual_section.append(
+                            f"[Frame @ {ts:.2f}] CAPTION: {caption}"
+                        )
+                    if ocr:
+                        visual_section.append(
+                            f"[Frame @ {ts:.2f}] OCR: {ocr}"
+                        )
 
-                if caption:
-                    visual_section.append(
-                        f"[Frame @ {ts:.2f}] CAPTION: {caption}"
-                    )
-
-                if ocr:
-                    visual_section.append(
-                        f"[Frame @ {ts:.2f}] OCR: {ocr}"
-                    )
-
+            # ── Score block ───────────────────────────────────────
             score_block = ""
             if self.include_scores:
                 score_block = (
@@ -238,18 +343,28 @@ class ContextBuilder:
                     f"{getattr(item, 'retrieval_score', 0):.3f}"
                 )
 
-            block_text = (
-                header +
-                "\n[Transcript]\n" +
-                "\n".join(transcript_section) +
-                "\n\n[Visual Evidence]\n" +
-                "\n".join(visual_section) +
-                score_block
-            )
+            # ── Assemble ──────────────────────────────────────────
+            if is_pdf:
+                block_text = (
+                    header +
+                    "[Document Text]\n" +
+                    "\n".join(transcript_section) +
+                    score_block
+                )
+            else:
+                block_text = (
+                    header +
+                    "\n[Transcript]\n" +
+                    "\n".join(transcript_section) +
+                    "\n\n[Visual Evidence]\n" +
+                    "\n".join(visual_section) +
+                    score_block
+                )
 
             blocks.append(block_text)
 
-        return "\n\n".join(blocks),citation_map
+        return "\n\n".join(blocks), citation_map
+
 
     # ============================================================
     # PROMPT POLICY

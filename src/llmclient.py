@@ -130,13 +130,20 @@ EVIDENCE BLOCKS:
                 metadata = citation_map[block_id]
 
                 valid.append({
-                    "block_id": block_id,
-                    "chunk_ids": metadata["chunk_ids"],
-                    "case_id": metadata["case_id"],
+                    "block_id":   block_id,
+                    "chunk_ids":  metadata["chunk_ids"],
+                    "case_id":    metadata["case_id"],
+                    "citation_ref": metadata.get("citation_ref", ""),
+                    # Video
                     "time_range": [
-                        metadata["start_time"],
-                        metadata["end_time"]
-                    ]
+                        metadata.get("start_time", 0),
+                        metadata.get("end_time", 0)
+                    ],
+                    # PDF
+                    "page_start":    metadata.get("page_start", 0),
+                    "page_end":      metadata.get("page_end", 0),
+                    "section_title": metadata.get("section_title", ""),
+                    "source_type":   metadata.get("source_type", ""),
                 })
 
         return valid
@@ -155,3 +162,29 @@ EVIDENCE BLOCKS:
         confidence = retrieval_confidence + citation_bonus
 
         return round(min(confidence, 1.0), 3)
+    
+    def classify(self, prompt: str) -> str:
+        """
+        Lightweight call for classification tasks.
+        Returns raw text response.
+        Used by EvidenceClassifier, ContradictionDetector etc.
+        """
+        try:
+            response = self.client.chat_completion(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a legal analyst. "
+                                "Respond only in valid JSON."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                temperature=0.1,   # Low temp for classification
+                max_tokens=200,    # Classification needs few tokens
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            raise RuntimeError(f"Classification failed: {e}")
