@@ -2,7 +2,6 @@
 torch==2.4.0+cpu
 torchaudio==2.4.0+cpu
 numpy==1.26.4
-gradio==5.20.0
 transformers==4.46.3
 sentence-transformers==3.3.1
 tokenizers==0.20.3
