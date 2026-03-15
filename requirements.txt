@@ -1,20 +1,25 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.4.0+cpu
 torchaudio==2.4.0+cpu
+
 numpy==1.26.4
-transformers==4.46.3
-tokenizers==0.20.3
+transformers==4.37.2
 sentence-transformers==3.3.1
+
 opencv-python-headless==4.10.0.84
 Pillow==10.4.0
 pytesseract
 yt-dlp
+
 lancedb==0.17.0
 faiss-cpu==1.8.0
+
 python-dotenv
 pdfplumber
 reportlab
+
 faster-whisper==0.10.0
 pyannote.audio==3.1.1
 whisperx==3.1.1
+
 gradio==4.44.0
