@@ -1,6 +1,10 @@
 FROM python:3.10
 
 RUN apt-get update && apt-get install -y \
+    build-essential \
+    gcc \
+    g++ \
+    python3-dev \
     ffmpeg \
     libavformat-dev \
     libavcodec-dev \
@@ -18,7 +22,9 @@ RUN useradd -m -u 1000 user
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+
+RUN pip install --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir -r requirements.txt
 
 COPY --chown=user . .
 
