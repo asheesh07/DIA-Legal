@@ -3,8 +3,8 @@ torch==2.4.0+cpu
 torchaudio==2.4.0+cpu
 numpy==1.26.4
 transformers==4.46.3
-sentence-transformers==3.3.1
 tokenizers==0.20.3
+sentence-transformers==3.3.1
 opencv-python-headless==4.10.0.84
 Pillow==10.4.0
 pytesseract
@@ -12,9 +12,8 @@ yt-dlp
 lancedb==0.17.0
 faiss-cpu==1.8.0
 python-dotenv
-huggingface-hub==0.26.5
 pdfplumber
 reportlab
 faster-whisper
 pyannote.audio==3.1.1
-git+https://github.com/m-bain/whisperX.git
+git+https://github.com/m-bain/whisperX.git@v3.1.5
