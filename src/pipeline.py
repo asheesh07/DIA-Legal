@@ -25,6 +25,11 @@ class DIAPipeline:
             top_k = 9,
 
         )
+        
+        # 1. RETRIEVAL FILTER PROMPT
+        # Lightweight filtering to decide relevance and prune noise.
+        retrieved_items = self.llm_answerer.llm_client.filter_chunks(query, retrieved_items)
+
         retrieval_confidence = self.retriever._estimate_confidence(retrieved_items)
         
         context_result = self.context_builder.build(

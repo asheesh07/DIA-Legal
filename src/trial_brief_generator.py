@@ -56,10 +56,11 @@ class TrialBrief:
     witness_profiles:    List[WitnessProfile]
     contradictions:      List[Dict]
     opposition_strategy: List[str]
-    recommended_questions: List[str]
-    overall_assessment:  str
+    questions_to_ask:    List[str]
+    key_risks:           List[str]
     case_strength:       str       # STRONG | MODERATE | WEAK
-    critical_actions:    List[str]
+    recommended_actions: List[str]
+    pdf_path:            str = ""
 
     def to_dict(self) -> Dict:
         return {
@@ -88,10 +89,11 @@ class TrialBrief:
             ],
             "contradictions":         self.contradictions,
             "opposition_strategy":    self.opposition_strategy,
-            "recommended_questions":  self.recommended_questions,
-            "overall_assessment":     self.overall_assessment,
+            "questions_to_ask":       self.questions_to_ask,
+            "key_risks":              self.key_risks,
             "case_strength":          self.case_strength,
-            "critical_actions":       self.critical_actions,
+            "recommended_actions":    self.recommended_actions,
+            "pdf_path":               self.pdf_path,
         }
 # ─────────────────────────────────────────────────────────────────
 # Hedge / Confident word lists
@@ -211,21 +213,16 @@ class TrialBriefGenerator:
             all_items, lawyer_position
         )
 
-        # ── Step 6: LLM Call 2 — Recommended Questions ───────────
-        recommended_questions = self._generate_questions(
-            contradiction_report, witness_profiles
-        )
-
-        # ── Step 7: LLM Call 3 — Overall Assessment ──────────────
-        assessment, case_strength, critical_actions = (
-            self._generate_assessment(
+        # ── Step 6: LLM Call 2 — Trial Strategy ───────────
+        case_strength, key_risks, recommended_actions, questions_to_ask = (
+            self._generate_trial_strategy(
                 evidence_map,
                 contradiction_report,
                 witness_profiles,
                 lawyer_position,
             )
         )
-        # ── Step 8: Format evidence sections ─────────────────────
+        # ── Step 7: Format evidence sections ─────────────────────
         strongest = [
             {
                 "strength":    e.strength,
@@ -275,10 +272,10 @@ class TrialBriefGenerator:
             witness_profiles = witness_profiles,
             contradictions   = contradictions,
             opposition_strategy = opposition_strategy,
-            recommended_questions = recommended_questions,
-            overall_assessment = assessment,
+            questions_to_ask = questions_to_ask,
+            key_risks        = key_risks,
             case_strength    = case_strength,
-            critical_actions = critical_actions,
+            recommended_actions = recommended_actions,
         )
 
         # ── Step 10: Save JSON + export PDF ───────────────────────
@@ -539,12 +536,14 @@ Be factual. No speculation. Plain professional language."""
         except Exception:
             return "Case summary unavailable."
 
-    def _generate_questions(
+    def _generate_trial_strategy(
         self,
+        evidence_map,
         contradiction_report,
         witness_profiles: List[WitnessProfile],
-    ) -> List[str]:
-
+        lawyer_position: str,
+    ) -> tuple:
+        
         contradiction_summary = "\n".join(
             f"- {c['explanation']} "
             f"({c['citation_a']} vs {c['citation_b']})"
@@ -558,88 +557,64 @@ Be factual. No speculation. Plain professional language."""
             ]
         ) or "No contradictions found."
 
-        hostile_witnesses = [
-            w.speaker_id for w in witness_profiles
-            if w.reliability_rating == "HOSTILE"
-        ]
+        supporting = len(getattr(evidence_map, "supporting", []))
+        opposing   = len(getattr(evidence_map, "opposing", []))
+        hostile    = [w.speaker_id for w in witness_profiles if w.reliability_rating == "HOSTILE"]
+        
+        opp_list = list(getattr(evidence_map, "opposing", []))
+        weaknesses = []
+        for i in range(min(3, len(opp_list))):
+            weaknesses.append(getattr(opp_list[i], "reason", ""))
 
-        prompt = f"""You are a senior trial lawyer.
-
-CONTRADICTIONS FOUND:
-{contradiction_summary}
-
-HOSTILE WITNESSES: {', '.join(hostile_witnesses) or 'None identified'}
-
-Generate 7 cross-examination questions that:
-- Expose the contradictions directly
-- Target hostile witnesses
-- Are specific and legally precise
-
-Respond ONLY in JSON:
-{{
-    "questions": [
-        "question 1",
-        "question 2",
-        "question 3",
-        "question 4",
-        "question 5",
-        "question 6",
-        "question 7"
-    ]
-}}"""
-
-        raw = self.llm_client.classify(prompt)
-        parsed = self._parse_json_safe(raw)
-        return parsed.get("questions", [])
-
-    def _generate_assessment(
-        self,
-        evidence_map,
-        contradiction_report,
-        witness_profiles,
-        lawyer_position: str,
-    ) -> tuple:
-
-        supporting = len(evidence_map.supporting)
-        opposing   = len(evidence_map.opposing)
-        contras    = len(contradiction_report.contradictions)
-        hostile    = sum(
-            1 for w in witness_profiles
-            if w.reliability_rating == "HOSTILE"
-        )
-
-        prompt = f"""You are a senior trial lawyer assessing case strength.
+        prompt = f"""Generate a trial strategy based on:
+- Evidence
+- Contradictions
+- Weaknesses
 
 LAWYER'S POSITION: {lawyer_position}
 
-EVIDENCE SUMMARY:
-- Supporting evidence pieces: {supporting}
-- Opposing evidence pieces:   {opposing}
-- Contradictions found:       {contras}
-- Hostile witnesses:          {hostile}
+EVIDENCE:
+- Supporting points: {supporting}
+- Opposing points: {opposing}
 
-Provide overall assessment in JSON:
+CONTRADICTIONS:
+{contradiction_summary}
+
+WEAKNESSES:
+{chr(10).join(weaknesses) if weaknesses else "None explicitly found."}
+
+HOSTILE WITNESSES:
+{', '.join(hostile) or 'None identified'}
+
+Return ONLY JSON format exactly:
 {{
-    "assessment": "2-3 sentence overall case assessment",
     "case_strength": "STRONG / MODERATE / WEAK",
-    "critical_actions": [
-        "most important action before court 1",
-        "most important action before court 2",
-        "most important action before court 3"
+    "key_risks": [
+        "risk 1",
+        "risk 2"
+    ],
+    "recommended_actions": [
+        "action 1",
+        "action 2"
+    ],
+    "questions_to_ask": [
+        "question 1",
+        "question 2"
     ]
 }}"""
 
         raw = self.llm_client.classify(prompt)
         parsed = self._parse_json_safe(raw)
 
-        assessment = parsed.get("assessment", "Assessment unavailable.")
-        strength   = parsed.get("case_strength", "MODERATE")
-        actions    = parsed.get("critical_actions", [])
+        case_strength = parsed.get("case_strength", "MODERATE")
+        if case_strength not in ("STRONG", "MODERATE", "WEAK"):
+            case_strength = "MODERATE"
+        
+        key_risks = parsed.get("key_risks", [])
+        recommended_actions = parsed.get("recommended_actions", [])
+        questions_to_ask = parsed.get("questions_to_ask", [])
 
-        if strength not in ("STRONG", "MODERATE", "WEAK"):
-            strength = "MODERATE"
-
-        return assessment, strength, actions
+        return case_strength, key_risks, recommended_actions, questions_to_ask
 
     def _extract_opposition_strategy(
         self, sessions: List[Dict], case_id: str
@@ -658,13 +633,13 @@ Provide overall assessment in JSON:
                 continue
 
         # Deduplicate
-        seen = set()
-        unique = []
+        seen: set[str] = set()
+        unique: List[str] = []
         for arg in opposition_args:
-            key = arg[:80].lower()
+            key = str(arg)[:80].lower()
             if key not in seen:
                 seen.add(key)
-                unique.append(arg)
+                unique.append(str(arg))
 
         return unique[:10]
 
@@ -931,7 +906,7 @@ Provide overall assessment in JSON:
             "7. RECOMMENDED CROSS-EXAMINATION QUESTIONS",
             heading_style
         ))
-        for i, q in enumerate(brief.recommended_questions, 1):
+        for i, q in enumerate(brief.questions_to_ask, 1):
             story.append(Paragraph(f"{i}. {q}", bullet_style))
 
         story.append(HRFlowable(
@@ -939,19 +914,24 @@ Provide overall assessment in JSON:
             color=colors.lightgrey, spaceAfter=8
         ))
 
-        # ── Section 8: Overall Assessment ────────────────────────
+        # ── Section 8: Key Risks & Recommended Actions ────────────────────────
         story.append(Paragraph(
-            "8. OVERALL ASSESSMENT", heading_style
+            "8. KEY RISKS & ACTIONS", heading_style
         ))
-        story.append(Paragraph(
-            brief.overall_assessment, body_style
-        ))
-        if brief.critical_actions:
+        
+        if brief.key_risks:
             story.append(Paragraph(
-                "<b>Critical Actions Before Court:</b>",
+                "<b>Key Risks:</b>", body_style
+            ))
+            for risk in brief.key_risks:
+                story.append(Paragraph(f"• {risk}", bullet_style))
+
+        if brief.recommended_actions:
+            story.append(Paragraph(
+                "<b>Recommended Actions Before Court:</b>",
                 body_style
             ))
-            for action in brief.critical_actions:
+            for action in brief.recommended_actions:
                 story.append(Paragraph(
                     f"⚠ {action}", bullet_style
                 ))

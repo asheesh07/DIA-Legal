@@ -1,27 +1,32 @@
---extra-index-url https://download.pytorch.org/whl/cpu
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+python-multipart==0.0.9
+pydantic==2.7.0
+python-dotenv==1.0.0
 
-torch==2.4.0+cpu
-torchaudio==2.4.0+cpu
+# ML
+torch
+transformers
+sentence-transformers
+huggingface-hub
 
-numpy==1.26.4
+# Embeddings & retrieval
+lancedb
+faiss-cpu
+rank-bm25
 
-transformers==4.37.2
-sentence-transformers==2.6.1
-
-opencv-python-headless==4.10.0.84
-Pillow==10.4.0
-pytesseract
+# Video processing
+ffmpeg-python
+whisperx
 yt-dlp
+opencv-python
+pytesseract
 
-lancedb==0.17.0
-faiss-cpu==1.8.0
-
-python-dotenv
+# PDF
 pdfplumber
 reportlab
 
-faster-whisper==0.10.0
-pyannote.audio==3.1.1
-whisperx==3.1.1
-
-gradio==4.44.0
+# Utilities
+numpy
+pandas
+Pillow

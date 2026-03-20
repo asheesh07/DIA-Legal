@@ -205,7 +205,8 @@ class DevilsAdvocate:
             Round with critique, weaknesses, opposition args,
             evidence used, and suggestions to strengthen.
         """
-        if self._session is None:
+        session = self._session
+        if session is None:
             raise RuntimeError(
                 "No active session. Call new_session() or "
                 "load_session() first."
@@ -213,7 +214,7 @@ class DevilsAdvocate:
 
         # 1. Retrieve opposing evidence
         opposing_items = self.retriever.retrieve(
-            case_id=self._session.case_id,
+            case_id=session.case_id,
             query=f"evidence against: {lawyer_argument}",
             top_k=self.top_k,
         )
@@ -226,7 +227,7 @@ class DevilsAdvocate:
         history_context = self._format_history()
 
         # 4. Build prompt
-        round_number = len(self._session.rounds) + 1
+        round_number = len(session.rounds) + 1
         prompt = self._build_prompt(
             lawyer_argument  = lawyer_argument,
             evidence_context = evidence_context,
@@ -245,9 +246,9 @@ class DevilsAdvocate:
             lawyer_argument  = lawyer_argument,
             critique         = parsed.get("critique", ""),
             weaknesses       = parsed.get("weaknesses", []),
-            opposition_args  = parsed.get("opposition_args", []),
+            opposition_args  = [parsed.get("counter_argument", "")] if "counter_argument" in parsed else [],
             evidence_used    = evidence_citations,
-            how_to_strengthen = parsed.get("how_to_strengthen", []),
+            how_to_strengthen = parsed.get("challenge_suggestions", []),
             timestamp        = now,
         )
 
@@ -281,9 +282,12 @@ Do not repeat weaknesses already resolved.
 Focus on what STILL remains weak or newly exposed.
 """
 
-        return f"""You are the opposing counsel in a legal proceeding.
-Your job is to brutally and specifically attack the lawyer's argument
-using the evidence available.
+        return f"""You are opposing counsel.
+
+Given the lawyer's argument and evidence:
+- Identify weaknesses
+- Construct strongest counter-argument
+- Suggest how to challenge in court
 
 Round {round_number} of cross-examination.
 {history_section}
@@ -294,33 +298,22 @@ LAWYER'S CURRENT ARGUMENT:
 AVAILABLE EVIDENCE TO USE AGAINST THIS ARGUMENT:
 {evidence_context}
 
-YOUR TASK:
-Attack this argument as opposing counsel would in court.
-Be specific. Use exact citations. Be brutal but accurate.
-
 Respond ONLY in this exact JSON format:
 {{
     "critique": "2-3 sentence overall assessment of how weak this argument is",
     "weaknesses": [
-        "specific weakness 1 with citation",
-        "specific weakness 2 with citation",
-        "specific weakness 3 with citation"
+        "specific weakness 1 with citation"
     ],
-    "opposition_args": [
-        "argument opposition will make in court 1",
-        "argument opposition will make in court 2",
-        "argument opposition will make in court 3"
-    ],
-    "how_to_strengthen": [
-        "concrete suggestion 1 to fix the argument",
-        "concrete suggestion 2 to fix the argument"
+    "counter_argument": "the strongest counter-argument",
+    "challenge_suggestions": [
+        "how to challenge in court 1"
     ]
 }}
 
 Rules:
 - weaknesses must reference specific evidence with citations
-- opposition_args must be realistic legal arguments
-- how_to_strengthen must be actionable and specific
+- counter_argument must be realistic legal argument
+- challenge_suggestions must be actionable in court
 - No text outside the JSON"""
 
     # ─────────────────────────────────────────────────────────────

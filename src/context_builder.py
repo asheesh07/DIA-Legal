@@ -237,7 +237,7 @@ class ContextBuilder:
     # ============================================================
     def _assemble_context(self, items):
 
-        blocks = []
+        blocks: List[str] = []
         citation_map = {}
 
         for idx, e in enumerate(items, start=1):
@@ -372,11 +372,17 @@ class ContextBuilder:
     def _build_system_prompt(self, mode: LegalMode, query_type: QueryType):
 
         base_rules = """
-You must rely ONLY on explicit statements from the evidence blocks.
-Do NOT speculate or infer beyond what is directly stated.
-If one block fully answers the question, do not use additional blocks.
-Cite evidence using [Block X].
-If insufficient evidence exists, explicitly state that it is insufficient.
+Answer the question strictly using the provided evidence.
+- Do not hallucinate
+- Cite evidence references using the block IDs (e.g., 1, 2)
+- Keep answer concise
+
+Return ONLY a valid JSON object in this format:
+{
+    "answer": "your concise answer here",
+    "supporting_evidence": [1, 2],
+    "confidence": 0.9
+}
 """
 
         if mode == LegalMode.EVIDENCE:
@@ -396,16 +402,14 @@ If insufficient evidence exists, explicitly state that it is insufficient.
         return f"""
 USER QUERY:
 {query}
-
-Use ONLY the evidence blocks above.
-Cite every factual claim using [Block X].
 """
 
     # ============================================================
     # TOKEN GUARD
     # ============================================================
-    def _truncate(self, text: str):
+    def _truncate(self, text: str) -> str:
         words = text.split()
-        if len(words) <= self.max_tokens:
+        limit = int(self.max_tokens)
+        if len(words) <= limit:
             return text
-        return " ".join(words[:self.max_tokens])
+        return " ".join(words[i] for i in range(limit))

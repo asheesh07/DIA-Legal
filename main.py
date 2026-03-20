@@ -1,10 +1,30 @@
+"""
+main.py — DIA-Legal FastAPI Backend
+"""
+
 import os
+import json
+import hashlib
 from pathlib import Path
+from typing import Optional, List
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+import shutil
+
+from dotenv import load_dotenv
+load_dotenv()
+
+# ── ML imports (heavy — loaded once at startup) ──────────────────
 from transformers import AutoTokenizer
+from sentence_transformers import SentenceTransformer
 
 from src.reader import ReaderRouter
 from src.video_processor import VideoProcessor
-from src.chunker import Chunker
+from src.chunker import Chunker, PDFChunker
 from src.embedder import MultiModalEmbedder, TextEmbedder, VisualEmbedder
 from src.vectorstore import LanceDBVectorStore
 from src.retriever import Retriever
@@ -15,299 +35,479 @@ from src.llm_answerer import LLMAnswerer
 from src.pipeline import DIAPipeline
 from src.query_router import QueryRouter
 from src.ingestion import IngestionPipeline
+from src.evidence_classifier import EvidenceClassifier, format_evidence_map
+from src.contradiction_detector import ContradictionDetector, format_contradiction_report
+from src.devils_advocate import DevilsAdvocate
+from src.trial_brief_generator import TrialBriefGenerator
 
-from sentence_transformers import SentenceTransformer
-# ============================================================
-# Config
-# ============================================================
-
+# ── Constants ─────────────────────────────────────────────────────
 BASE_STORAGE = "data"
-DB_PATH = "data/lancedb"
-HF_TOKEN = os.getenv("HF_TOKEN")
+DB_PATH      = "data/lancedb"
+CACHE_FILE   = "data/ingestion_cache.json"
+CASES_FILE   = "data/cases_registry.json"
 
+# ── Global system instances ───────────────────────────────────────
+_systems = {}
 
-# ============================================================
-# Build System Components
-# ============================================================
+# ── Lifespan ──────────────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("[DIA-Legal] Initialising systems...")
+    _systems.update(_build_systems())
+    print("[DIA-Legal] Ready.")
+    yield
 
-from dotenv import load_dotenv
-load_dotenv()
+app = FastAPI(title="DIA-Legal API", version="2.0.0", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── System bootstrap ──────────────────────────────────────────────
 def _build_systems():
+    tokenizer       = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-Instruct-v0.2")
+    video_processor = VideoProcessor(base_output_path=BASE_STORAGE, model_size="base")
+    chunker         = Chunker(max_duration=20, max_tokens=512, overlap_duration=5, tokenizer=tokenizer)
+    pdf_chunker     = PDFChunker(max_tokens=512, overlap_tokens=50)
 
-    # ------------------------------
-    # Tokenizer (for chunking only)
-    # ------------------------------
-    tokenizer = AutoTokenizer.from_pretrained(
-        "mistralai/Mistral-7B-Instruct-v0.2"
-    )
+    text_model      = SentenceTransformer("all-MiniLM-L6-v2")
+    text_embedder   = TextEmbedder(model=text_model, batch_size=12, normalize=True)
+    visual_embedder = VisualEmbedder(model_name="openai/clip-vit-base-patch32", device="cpu", normalize=True)
+    embedder        = MultiModalEmbedder(text_embedder=text_embedder, visual_embedder=visual_embedder)
 
-    # ------------------------------
-    # Core Processing
-    # ------------------------------
-    video_processor = VideoProcessor(
-        base_output_path=BASE_STORAGE,
-        model_size="base"
-    )
-
-    chunker = Chunker(
-        max_duration=20,
-        max_tokens=512,
-        overlap_duration=5,
-        tokenizer=tokenizer
-    )
-
-    # ------------------------------
-    # Embedders
-    # ------------------------------
-    text_model = SentenceTransformer("all-MiniLM-L6-v2")
-    text_embedder = TextEmbedder(
-        model=text_model,
-        batch_size=12,
-        normalize=True
-    )
-
-    visual_embedder = VisualEmbedder(
-        model_name="openai/clip-vit-base-patch32",
-        device="cpu",
-        normalize=True
-    )
-
-    embedder = MultiModalEmbedder(
-        text_embedder=text_embedder,
-        visual_embedder=visual_embedder,
-        visual_aggregation="mean"
-    )
-
-    # ------------------------------
-    # Vector Store
-    # ------------------------------
-    text_dim = text_embedder.embed_dims
-    visual_dim = visual_embedder.embed_dim
     vector_store = LanceDBVectorStore(
-        table_name="dia_legal",
-        db_path=DB_PATH,
-        text_dim=text_dim,
-        visual_dim=visual_dim
+        table_name="dia_legal_v2", db_path=DB_PATH,
+        text_dim=text_embedder.embed_dims, visual_dim=visual_embedder.embed_dim
     )
-
-    # ------------------------------
-    # Reranker
-    # ------------------------------
-    reranker = CrossEncoderReranker(
-        model_name="cross-encoder/ms-marco-MiniLM-L-6-v2",
-        batch_size=32,
-        normalize=True
-    )
-
-    # ------------------------------
-    # Retriever
-    # ------------------------------
+    reranker  = CrossEncoderReranker(model_name="cross-encoder/ms-marco-MiniLM-L-6-v2", batch_size=32, normalize=True)
     retriever = Retriever(
-        vector_store=vector_store,
-        embedder=embedder,
-        max_candidates=30,
-        reranker=reranker,
-        enable_mmr=True,
-        mmr_lambda=0.5,
-        min_threshold=0.0,
-        temporary_window=5
+        vector_store=vector_store, embedder=embedder,
+        max_candidates=30, reranker=reranker,
+        enable_mmr=True, mmr_lambda=0.5, min_threshold=0.0, temporary_window=5
     )
 
-    # ------------------------------
-    # Context Builder
-    # ------------------------------
-    context_builder = ContextBuilder(
-        max_tokens=2000,
-        include_scores=True
-    )
+    context_builder = ContextBuilder(max_tokens=2000, include_scores=True)
+    llm_client      = LLMClient(api_token=os.environ.get("HF_TOKEN"))
+    answerer        = LLMAnswerer(llm_client=llm_client, confidence_threshold=0.3, max_history=3)
 
-    # ------------------------------
-    # LLM
-    # ------------------------------
-    llm_client = LLMClient(
-        api_token=HF_TOKEN
-    )
-
-    answerer = LLMAnswerer(
-        llm_client=llm_client,
-        confidence_threshold=0.3,
-        max_history=3
-    )
-
-    # ------------------------------
-    # Pipeline
-    # ------------------------------
     pipeline = DIAPipeline(
-        retriever=retriever,
-        context_builder=context_builder,
-        llm_answerer=answerer,
-        query_router=QueryRouter()
+        retriever=retriever, context_builder=context_builder,
+        llm_answerer=answerer, query_router=QueryRouter()
     )
-
-    # ------------------------------
-    # Ingestion Pipeline
-    # ------------------------------
     ingestion_pipeline = IngestionPipeline(
-        reader_router=ReaderRouter,
-        video_processor=video_processor,
-        chunker=chunker,
-        embedder=embedder,
-        vector_store=vector_store
+        reader_router=ReaderRouter, video_processor=video_processor,
+        chunker=chunker, embedder=embedder,
+        vector_store=vector_store, pdf_chunker=pdf_chunker
     )
-
-    return pipeline, ingestion_pipeline
-
-
-# ============================================================
-# Main Execution
-# ============================================================
-
-def main():
-
-    case_id = "Case_001"
-
-    # ----------------------------------------
-    # Build System
-    # ----------------------------------------
-    pipeline, ingestion_pipeline = _build_systems()
-
-    # ----------------------------------------
-    # Ingest Evidence (Only Once Per Case)
-    # ----------------------------------------
-    source = "https://www.youtube.com/shorts/-wkbQhkmGlc"
-
-    print("\n[INFO] Starting ingestion...\n")
-
-    ingestion_result = ingestion_pipeline.ingest(
-        source=source,
-        case_id=case_id,
+    evidence_classifier = EvidenceClassifier(
+        retriever=retriever, llm_client=llm_client,
+        context_builder=context_builder, top_k=50
+    )
+    contradiction_detector = ContradictionDetector(
+        retriever=retriever, llm_client=llm_client,
+        embedder=embedder, similarity_threshold=0.4, top_k=100
+    )
+    devils_advocate = DevilsAdvocate(
+        retriever=retriever, llm_client=llm_client,
+        storage_path=BASE_STORAGE, top_k=10
+    )
+    brief_generator = TrialBriefGenerator(
+        retriever=retriever, llm_client=llm_client,
+        evidence_classifier=evidence_classifier,
+        contradiction_detector=contradiction_detector,
+        devils_advocate=devils_advocate,
         storage_path=BASE_STORAGE
     )
 
-    print("[INFO] Ingestion Result:", ingestion_result)
+    return {
+        "pipeline": pipeline,
+        "ingestion": ingestion_pipeline,
+        "evidence_classifier": evidence_classifier,
+        "contradiction_detector": contradiction_detector,
+        "devils_advocate": devils_advocate,
+        "brief_generator": brief_generator,
+        "retriever": retriever,
+        "embedder": embedder,
+    }
 
-    # ----------------------------------------
-    # Query Loop
-    # ----------------------------------------
-    while True:
+# ── Cache helpers ─────────────────────────────────────────────────
+def _load_cache():
+    Path(CACHE_FILE).parent.mkdir(parents=True, exist_ok=True)
+    if Path(CACHE_FILE).exists():
+        with open(CACHE_FILE) as f:
+            return json.load(f)
+    return {}
 
-        query = input("\nEnter Query (type 'exit' to quit): ")
+def _save_cache(cache):
+    with open(CACHE_FILE, "w") as f:
+        json.dump(cache, f, indent=2)
 
-        if query.lower() == "exit":
-            break
+def _cache_key(source, case_id):
+    return hashlib.md5(f"{source}::{case_id}".encode()).hexdigest()
 
-        result = pipeline.run(
-            query=query,
-            case_id=case_id
+def _load_cases():
+    Path(CASES_FILE).parent.mkdir(parents=True, exist_ok=True)
+    if Path(CASES_FILE).exists():
+        with open(CASES_FILE) as f:
+            return json.load(f)
+    return {}
+
+def _save_cases(cases):
+    with open(CASES_FILE, "w") as f:
+        json.dump(cases, f, indent=2)
+
+def _register_case(case_id, name, source_type, chunks):
+    cases = _load_cases()
+    if case_id not in cases:
+        cases[case_id] = {"sources": [], "total_chunks": 0}
+    existing = [s["name"] for s in cases[case_id]["sources"]]
+    if name not in existing:
+        cases[case_id]["sources"].append({"name": name, "type": source_type, "chunks": chunks})
+    cases[case_id]["total_chunks"] = sum(s["chunks"] for s in cases[case_id]["sources"])
+    _save_cases(cases)
+
+
+# ════════════════════════════════════════════════════════════════
+# PYDANTIC MODELS
+# ════════════════════════════════════════════════════════════════
+
+class QueryRequest(BaseModel):
+    case_id: str
+    query: str
+    mode: Optional[str] = "evidence"
+
+class EvidenceMapRequest(BaseModel):
+    case_id: str
+    lawyer_position: str
+
+class ContradictionRequest(BaseModel):
+    case_id: str
+
+class DANewSessionRequest(BaseModel):
+    case_id: str
+    topic: str
+
+class DAArgueRequest(BaseModel):
+    session_id: str
+    case_id: str
+    argument: str
+
+class BriefRequest(BaseModel):
+    case_id: str
+    lawyer_position: str
+
+class YouTubeIngestRequest(BaseModel):
+    case_id: str
+    url: str
+
+
+# ════════════════════════════════════════════════════════════════
+# ROUTES — CASES
+# ════════════════════════════════════════════════════════════════
+
+@app.get("/api/cases")
+def list_cases():
+    cases = _load_cases()
+    result = []
+    for cid, data in cases.items():
+        result.append({
+            "case_id": cid,
+            "source_count": len(data.get("sources", [])),
+            "total_chunks": data.get("total_chunks", 0),
+            "sources": data.get("sources", []),
+        })
+    return {"cases": result}
+
+
+@app.get("/api/cases/{case_id}")
+def get_case(case_id: str):
+    cases = _load_cases()
+    if case_id not in cases:
+        raise HTTPException(status_code=404, detail="Case not found")
+    return {"case_id": case_id, **cases[case_id]}
+
+
+@app.delete("/api/cases/{case_id}")
+def delete_case(case_id: str):
+    cases = _load_cases()
+    if case_id not in cases:
+        raise HTTPException(status_code=404, detail="Case not found")
+    del cases[case_id]
+    _save_cases(cases)
+    return {"status": "deleted", "case_id": case_id}
+
+
+# ════════════════════════════════════════════════════════════════
+# ROUTES — INGEST
+# ════════════════════════════════════════════════════════════════
+
+@app.post("/api/ingest/youtube")
+def ingest_youtube(body: YouTubeIngestRequest):
+    case_id = body.case_id.strip()
+    url     = body.url.strip()
+
+    cache = _load_cache()
+    key   = _cache_key(url, case_id)
+
+    if key in cache:
+        return {
+            "status": "cached",
+            "message": f"Already ingested — {cache[key].get('chunks', '?')} chunks",
+            "chunks": cache[key].get("chunks", 0)
+        }
+
+    try:
+        result = _systems["ingestion"].ingest(source=url, case_id=case_id, storage_path=BASE_STORAGE)
+        n = result.get("chunks_indexed", 0)
+        cache[key] = {"source": url, "case_id": case_id, "chunks": n}
+        _save_cache(cache)
+        _register_case(case_id, url[:60], "video", n)
+        return {"status": "success", "chunks": n, "case_id": case_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ingest/video")
+async def ingest_video(
+    case_id: str = Form(...),
+    file: UploadFile = File(...)
+):
+    case_id = case_id.strip()
+    tmp_dir = Path(BASE_STORAGE) / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = tmp_dir / file.filename
+
+    with open(tmp_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    cache = _load_cache()
+    key   = _cache_key(str(tmp_path), case_id)
+
+    if key in cache:
+        tmp_path.unlink(missing_ok=True)
+        return {"status": "cached", "chunks": cache[key].get("chunks", 0)}
+
+    try:
+        result = _systems["ingestion"].ingest(source=str(tmp_path), case_id=case_id, storage_path=BASE_STORAGE)
+        n = result.get("chunks_indexed", 0)
+        cache[key] = {"source": file.filename, "case_id": case_id, "chunks": n}
+        _save_cache(cache)
+        _register_case(case_id, file.filename, "video", n)
+        return {"status": "success", "chunks": n, "case_id": case_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+@app.post("/api/ingest/pdf")
+async def ingest_pdf(
+    case_id: str = Form(...),
+    files: List[UploadFile] = File(...)
+):
+    case_id = case_id.strip()
+    results = []
+
+    tmp_dir = Path(BASE_STORAGE) / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    cache = _load_cache()
+
+    for file in files:
+        tmp_path = tmp_dir / file.filename
+        with open(tmp_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+
+        key = _cache_key(file.filename, case_id)
+        if key in cache:
+            tmp_path.unlink(missing_ok=True)
+            results.append({
+                "name": file.filename,
+                "status": "cached",
+                "chunks": cache[key].get("chunks", 0)
+            })
+            continue
+
+        try:
+            result = _systems["ingestion"].ingest(source=str(tmp_path), case_id=case_id, storage_path=BASE_STORAGE)
+            n       = result.get("chunks_indexed", 0)
+            doctype = result.get("doc_type", "document")
+            cache[key] = {"source": file.filename, "case_id": case_id, "chunks": n}
+            _register_case(case_id, file.filename, doctype, n)
+            results.append({"name": file.filename, "status": "success", "chunks": n, "doc_type": doctype})
+        except Exception as e:
+            results.append({"name": file.filename, "status": "error", "error": str(e)})
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    _save_cache(cache)
+    return {"results": results, "case_id": case_id}
+
+
+# ════════════════════════════════════════════════════════════════
+# ROUTES — QUERY
+# ════════════════════════════════════════════════════════════════
+
+@app.post("/api/query")
+def query(body: QueryRequest):
+    try:
+        result = _systems["pipeline"].run(
+            query=body.query.strip(),
+            case_id=body.case_id.strip()
         )
+        return {
+            "answer":     result.get("answer", ""),
+            "citations":  result.get("citations", []),
+            "confidence": result.get("confidence", 0.0),
+            "mode":       result.get("mode", body.mode),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-        print("\n==============================")
-        print("ANSWER:\n")
-        print(result["answer"])
-        print("\nCITATIONS:\n", result["citations"])
-        print("\nCONFIDENCE:", result["confidence"])
-        print("==============================\n")
+
+# ════════════════════════════════════════════════════════════════
+# ROUTES — EVIDENCE MAP
+# ════════════════════════════════════════════════════════════════
+
+@app.post("/api/evidence-map")
+def evidence_map(body: EvidenceMapRequest):
+    try:
+        em  = _systems["evidence_classifier"].classify(
+            case_id=body.case_id.strip(),
+            lawyer_position=body.lawyer_position.strip()
+        )
+        fmt = format_evidence_map(em)
+        return {
+            "supporting": fmt["supporting"]["rows"],
+            "opposing":   fmt["opposing"]["rows"],
+            "neutral":    fmt["neutral"]["rows"],
+            "summary":    em.summary,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-# ============================================================
-# Entry Point
-# ============================================================
+# ════════════════════════════════════════════════════════════════
+# ROUTES — CONTRADICTIONS
+# ════════════════════════════════════════════════════════════════
+
+@app.post("/api/contradictions")
+def detect_contradictions(body: ContradictionRequest):
+    try:
+        report = _systems["contradiction_detector"].detect(case_id=body.case_id.strip())
+        fmt    = format_contradiction_report(report)
+        return {
+            "contradictions": fmt["rows"],
+            "summary":        report.summary,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ════════════════════════════════════════════════════════════════
+# ROUTES — DEVIL'S ADVOCATE
+# ════════════════════════════════════════════════════════════════
+
+@app.post("/api/devils-advocate/session")
+def da_new_session(body: DANewSessionRequest):
+    try:
+        session = _systems["devils_advocate"].new_session(
+            case_id=body.case_id.strip(),
+            topic=body.topic.strip()
+        )
+        return {"session_id": session.session_id, "status": "created"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/devils-advocate/argue")
+def da_argue(body: DAArgueRequest):
+    try:
+        da = _systems["devils_advocate"]
+        da.load_session(case_id=body.case_id.strip(), session_id=body.session_id.strip())
+        result = da.argue(body.argument.strip())
+        return {
+            "critique":       result.critique,
+            "weaknesses":     result.weaknesses,
+            "opposition":     result.opposition_argument,
+            "strengthen":     result.how_to_strengthen,
+            "round_number":   result.round_number,
+            "evidence_count": len(result.supporting_evidence),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/devils-advocate/sessions/{case_id}")
+def da_list_sessions(case_id: str):
+    try:
+        sessions = _systems["devils_advocate"].list_sessions(case_id.strip())
+        return {"sessions": sessions}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ════════════════════════════════════════════════════════════════
+# ROUTES — TRIAL BRIEF
+# ════════════════════════════════════════════════════════════════
+
+@app.post("/api/brief")
+def generate_brief(body: BriefRequest):
+    try:
+        brief = _systems["brief_generator"].generate(
+            case_id=body.case_id.strip(),
+            lawyer_position=body.lawyer_position.strip()
+        )
+        return {
+            "brief_id":            brief.brief_id,
+            "case_strength":       brief.case_strength,
+            "case_summary":        brief.case_summary,
+            "overall_assessment":  brief.overall_assessment,
+            "critical_actions":    brief.critical_actions,
+            "witness_profiles":    [
+                {
+                    "speaker_id":          w.speaker_id,
+                    "inferred_role":       w.inferred_role,
+                    "reliability_rating":  w.reliability_rating,
+                    "credibility_score":   w.credibility_score,
+                    "contradiction_count": w.contradiction_count,
+                    "recommended_approach": w.recommended_approach,
+                }
+                for w in brief.witness_profiles
+            ],
+            "contradictions":          brief.contradictions,
+            "recommended_questions":   brief.recommended_questions,
+            "pdf_path":                str(brief.pdf_path) if getattr(brief, "pdf_path", None) else None,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/brief/download/{brief_id}")
+def download_brief(brief_id: str):
+    pdf_path = Path(BASE_STORAGE) / "briefs" / f"{brief_id}.pdf"
+    if not pdf_path.exists():
+        raise HTTPException(status_code=404, detail="Brief PDF not found")
+    return FileResponse(
+        path=str(pdf_path),
+        media_type="application/pdf",
+        filename=f"trial_brief_{brief_id}.pdf"
+    )
+
+
+# ════════════════════════════════════════════════════════════════
+# HEALTH
+# ════════════════════════════════════════════════════════════════
+
+@app.get("/api/health")
+def health():
+    return {"status": "ok", "version": "2.0.0"}
+
 
 if __name__ == "__main__":
-    main()
-
-
-
-
-cat > create_test_docs.py << 'EOF'
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib.pagesizes import letter
-
-styles = getSampleStyleSheet()
-
-doc = SimpleDocTemplate("test_fir.pdf", pagesize=letter)
-story = []
-story.append(Paragraph("FIRST INFORMATION REPORT", styles["Title"]))
-story.append(Paragraph("FIR No: 2024/001", styles["Normal"]))
-story.append(Spacer(1, 12))
-story.append(Paragraph("1. BACKGROUND", styles["Heading1"]))
-story.append(Paragraph(
-    "On the date of the Valencia Grand Prix the defendant driver "
-    "Kevin Magnussen was operating vehicle No. 20. Station House "
-    "Officer received complaint at 14:32 local time.", styles["Normal"]))
-story.append(Spacer(1, 12))
-story.append(Paragraph("2. STATEMENT OF FACTS", styles["Heading1"]))
-story.append(Paragraph(
-    "The gearbox of vehicle No. 20 showed signs of prior damage "
-    "before the race commenced. Engineering telemetry confirmed "
-    "anomalous gear shift patterns from lap 3 onwards. The driver "
-    "was informed via radio communication at lap 5 that the gearbox "
-    "was operating outside normal parameters.", styles["Normal"]))
-story.append(Spacer(1, 12))
-story.append(Paragraph("3. ALLEGATIONS", styles["Heading1"]))
-story.append(Paragraph(
-    "It is alleged that the defendant had prior knowledge of the "
-    "mechanical fault and continued racing. The defendant denies "
-    "all knowledge of the fault prior to lap 12 when the gearbox "
-    "failed completely.", styles["Normal"]))
-doc.build(story)
-print("Created test_fir.pdf")
-
-doc2 = SimpleDocTemplate("test_witness_statement.pdf", pagesize=letter)
-story2 = []
-story2.append(Paragraph("WITNESS STATEMENT", styles["Title"]))
-story2.append(Paragraph("Witness: Guenther Steiner, Team Principal", styles["Normal"]))
-story2.append(Spacer(1, 12))
-story2.append(Paragraph("EXAMINATION", styles["Heading1"]))
-story2.append(Paragraph(
-    "I hereby state that on the morning of the race I personally "
-    "reviewed the pre-race engineering report. The gearbox was "
-    "declared fit for competition by our chief engineer. "
-    "I was not aware of any anomaly at the time of race start.",
-    styles["Normal"]))
-story2.append(Spacer(1, 12))
-story2.append(Paragraph("CROSS EXAMINATION", styles["Heading1"]))
-story2.append(Paragraph(
-    "When pressed on the telemetry data I confirmed that the "
-    "engineering team did flag a minor irregularity on lap 3 "
-    "but we assessed it as within acceptable tolerance. "
-    "The driver was not informed because we did not consider "
-    "it a safety risk at that point.", styles["Normal"]))
-story2.append(Spacer(1, 12))
-story2.append(Paragraph("RE-EXAMINATION", styles["Heading1"]))
-story2.append(Paragraph(
-    "I stand by my earlier statement. The driver had no knowledge "
-    "of the gearbox irregularity until the failure on lap 12. "
-    "The decision not to inform the driver was made collectively "
-    "by the engineering team.", styles["Normal"]))
-doc2.build(story2)
-print("Created test_witness_statement.pdf")
-
-doc3 = SimpleDocTemplate("test_court_order.pdf", pagesize=letter)
-story3 = []
-story3.append(Paragraph("FIA INTERNATIONAL TRIBUNAL", styles["Title"]))
-story3.append(Paragraph("COURT ORDER — Case 2024/F1/001", styles["Normal"]))
-story3.append(Spacer(1, 12))
-story3.append(Paragraph("WHEREAS", styles["Heading1"]))
-story3.append(Paragraph(
-    "The Tribunal has reviewed all submitted evidence including "
-    "telemetry data witness statements and video footage of "
-    "the Valencia Grand Prix proceedings.", styles["Normal"]))
-story3.append(Spacer(1, 12))
-story3.append(Paragraph("THEREFORE", styles["Heading1"]))
-story3.append(Paragraph(
-    "It is hereby ordered that the defendant team shall produce "
-    "all engineering logs and radio communications from lap 1 "
-    "through lap 12 of the Valencia Grand Prix.", styles["Normal"]))
-story3.append(Spacer(1, 12))
-story3.append(Paragraph("ORDER", styles["Heading1"]))
-story3.append(Paragraph(
-    "The Tribunal finds sufficient evidence to proceed to a full "
-    "hearing. The burden of proof rests with the defense to "
-    "demonstrate the driver had no prior knowledge of the fault.",
-    styles["Normal"]))
-doc3.build(story3)
-print("Created test_court_order.pdf")
-print("\nAll test documents ready.")
-EOF
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

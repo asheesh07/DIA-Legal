@@ -75,14 +75,29 @@ EVIDENCE BLOCKS:
                 max_tokens=self.max_tokens,
             )
 
-            answer_text = response.choices[0].message.content.strip()
+            raw_text = response.choices[0].message.content.strip()
 
+            import json
+            import re
+            
+            # Extract JSON
+            cleaned = re.sub(r"```json|```", "", raw_text).strip()
+            match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+            
+            if match:
+                parsed = json.loads(match.group())
+                answer_text = parsed.get("answer", "Answer unavailable.")
+                cited_blocks = parsed.get("supporting_evidence", [])
+                llm_confidence = parsed.get("confidence", 0.0)
+            else:
+                answer_text = raw_text
+                cited_blocks = self._extract_block_references(raw_text)
+                llm_confidence = 0.5
+                
         except Exception as e:
             raise RuntimeError(f"LLM generation failed: {str(e)}")
 
-        latency = round(time.time() - start_time, 3)
-
-        cited_blocks = self._extract_block_references(answer_text)
+        latency = round(float(time.time() - start_time), 3)
 
         validated_citations = self._validate_citations(
             cited_blocks,
@@ -93,11 +108,14 @@ EVIDENCE BLOCKS:
             retrieval_confidence,
             len(validated_citations)
         )
+        
+        # blend llm_confidence and retrieval_confidence
+        combined_confidence = (final_confidence + llm_confidence) / 2.0
 
         return {
             "answer": answer_text,
             "citations": validated_citations,
-            "confidence": final_confidence,
+            "confidence": combined_confidence,
             "mode": mode,
             "llm_metadata": {
                 "model": self.model,
@@ -107,7 +125,7 @@ EVIDENCE BLOCKS:
         }
 
     # ============================================================
-    # Extract [Block X] references
+    # Extract [Block X] references (fallback)
     # ============================================================
     def _extract_block_references(self, text: str) -> List[int]:
         pattern = r"\[block (\d+)\]"
@@ -188,3 +206,78 @@ EVIDENCE BLOCKS:
             return response.choices[0].message.content.strip()
         except Exception as e:
             raise RuntimeError(f"Classification failed: {e}")
+
+    # ============================================================
+    # 1. RETRIEVAL FILTER PROMPT (LIGHTWEIGHT)
+    # ============================================================
+    def filter_chunks(self, query: str, retrieved_items: list) -> list:
+        """
+        Purpose: decide relevance / filter noise
+        Given the query and retrieved chunks, select the most relevant evidence.
+        Return only the top relevant pieces with short justification.
+        No reasoning, no verbosity.
+        """
+        if not retrieved_items:
+            return []
+
+        # Prepare evidence texts for the prompt
+        evidence_blocks = []
+        for idx, item in enumerate(retrieved_items):
+            # Extract basic text across all transcript segments
+            texts = [seg.get("text", "") for seg in getattr(item, "structured_transcripts", [])]
+            content_str = str(" ".join(texts).strip())
+            if not content_str:
+                # for documents
+                 if getattr(item, "structured_transcripts", []):
+                     content_str = str(" ".join([str(seg.get("text", "")) for seg in getattr(item, "structured_transcripts", [])]))
+            
+            # Limit length for lightweight call
+            content_str = content_str[:300]
+            evidence_blocks.append(f"[Chunk {idx}]\n{content_str}")
+
+        evidence_text = "\n\n".join(evidence_blocks)
+
+        prompt = f"""Given the query and retrieved chunks, select the most relevant evidence.
+Return only the top relevant pieces with short justification.
+No reasoning, no verbosity.
+
+QUERY: {query}
+
+EVIDENCE CHUNKS:
+{evidence_text}
+
+Respond ONLY in valid JSON format exactly like this:
+{{
+    "relevant_chunks": [
+        {{"chunk_index": 0, "justification": "short justification here"}}
+    ]
+}}"""
+
+        try:
+            raw = self.classify(prompt)
+            # Extact JSON
+            import json
+            raw = re.sub(r"```json|```", "", raw).strip()
+            match = re.search(r"\{.*\}", raw, re.DOTALL)
+            if not match:
+                return retrieved_items[:3] # fallback
+
+            parsed = json.loads(match.group())
+            relevant_indices = [
+                c.get("chunk_index") for c in parsed.get("relevant_chunks", [])
+                if isinstance(c.get("chunk_index"), int)
+            ]
+
+            filtered_items = []
+            for idx in relevant_indices:
+                if 0 <= idx < len(retrieved_items):
+                    filtered_items.append(retrieved_items[idx])
+
+            # fallback if filtered everything but items existed
+            if not filtered_items and retrieved_items:
+                return retrieved_items[:3]
+
+            return filtered_items
+        except Exception:
+            return retrieved_items[:3]
+

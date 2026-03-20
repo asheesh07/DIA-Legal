@@ -342,7 +342,8 @@ class ContradictionDetector:
                 "at different points in the proceedings."
             )
 
-        return f"""You are a strict legal analyst checking for contradictions.
+        return f"""Analyze the following evidence snippets.
+Identify contradictions or inconsistencies.
 
 {context_label}
 
@@ -358,24 +359,17 @@ Speaker/Document: {stmt_b.speaker}
 Citation: {stmt_b.citation_ref}
 "{stmt_b.text}"
 
-TASK:
-Do these two statements factually contradict each other?
-A contradiction means both cannot be true at the same time.
-Different topics or unrelated statements are NOT contradictions.
-
 Respond ONLY in this exact JSON format:
 {{
-    "is_contradiction": true,
-    "explanation": "one sentence explaining the exact conflict",
-    "severity": "high"
+    "contradiction_pairs": true,
+    "explanation": "Identify contradictions or inconsistencies between the pairs",
+    "severity": "high/medium/low"
 }}
 
 Rules:
-- is_contradiction: true or false only
-- explanation: one sentence, specific about what conflicts
-- severity: "high" (direct factual conflict) |
-            "medium" (likely conflict, some ambiguity) |
-            "low" (possible conflict, needs investigation)
+- contradiction_pairs: true if they contradict, false otherwise
+- explanation: one sentence explaining the exact conflict
+- severity: "high" (direct factual conflict), "medium" (likely conflict), "low" (possible conflict)
 - No text outside the JSON"""
 
     # ─────────────────────────────────────────────────────────────
@@ -393,7 +387,8 @@ Rules:
             is_pdf = self._is_pdf_chunk(item)
             meta   = getattr(item, "metadata", {})
 
-            for seg in item.structured_transcripts:
+            structured_transcripts = getattr(item, "structured_transcripts", [])
+            for seg in structured_transcripts:
                 text = seg.get("text", "").strip()
                 if not text or len(text.split()) < 5:
                     continue
@@ -419,7 +414,7 @@ Rules:
                     start_time = seg.get("start", 0.0),
                     end_time   = seg.get("end", 0.0),
                     chunk_id   = (
-                        item.chunk_ids[0] if item.chunk_ids else ""
+                        getattr(item, "chunk_ids", [""])[0] if getattr(item, "chunk_ids", None) else ""
                     ),
 
                     # PDF fields
@@ -448,8 +443,9 @@ Rules:
         return float(np.dot(a, b) / (norm_a * norm_b))
 
     def _is_pdf_chunk(self, item) -> bool:
-        if item.structured_transcripts:
-            speaker = item.structured_transcripts[0].get(
+        structured_transcripts = getattr(item, "structured_transcripts", [])
+        if structured_transcripts:
+            speaker = structured_transcripts[0].get(
                 "speaker", ""
             )
             if speaker == "DOCUMENT":
@@ -515,7 +511,7 @@ Rules:
         except json.JSONDecodeError:
             return None
 
-        is_contradiction = parsed.get("is_contradiction", False)
+        is_contradiction = parsed.get("contradiction_pairs", False)
         if isinstance(is_contradiction, str):
             is_contradiction = is_contradiction.lower() == "true"
 
