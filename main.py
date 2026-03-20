@@ -3,42 +3,24 @@ main.py — DIA-Legal FastAPI Backend
 """
 
 import os
+import sys
 import json
 import hashlib
 from pathlib import Path
 from typing import Optional, List
 from contextlib import asynccontextmanager
 
+print("Python starting...", flush=True)
+
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import shutil
+print("FastAPI imported", flush=True)
 
 from dotenv import load_dotenv
 load_dotenv()
-
-# ── ML imports (heavy — loaded once at startup) ──────────────────
-from transformers import AutoTokenizer
-from sentence_transformers import SentenceTransformer
-
-from src.reader import ReaderRouter
-from src.video_processor import VideoProcessor
-from src.chunker import Chunker, PDFChunker
-from src.embedder import MultiModalEmbedder, TextEmbedder, VisualEmbedder
-from src.vectorstore import LanceDBVectorStore
-from src.retriever import Retriever
-from src.reranker import CrossEncoderReranker
-from src.llmclient import LLMClient
-from src.context_builder import ContextBuilder
-from src.llm_answerer import LLMAnswerer
-from src.pipeline import DIAPipeline
-from src.query_router import QueryRouter
-from src.ingestion import IngestionPipeline
-from src.evidence_classifier import EvidenceClassifier, format_evidence_map
-from src.contradiction_detector import ContradictionDetector, format_contradiction_report
-from src.devils_advocate import DevilsAdvocate
-from src.trial_brief_generator import TrialBriefGenerator
 
 # ── Constants ─────────────────────────────────────────────────────
 BASE_STORAGE = "data"
@@ -52,29 +34,53 @@ _systems = {}
 # ── Lifespan ──────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("[DIA-Legal] Initialising systems...", flush=True)
-    try:
-        _systems.update(_build_systems())
-        print("[DIA-Legal] Ready.", flush=True)
-    except Exception as e:
-        print(f"[DIA-Legal] STARTUP FAILED: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
-        raise
+    print("[DIA-Legal] Server starting...", flush=True)
     yield
+    print("[DIA-Legal] Shutdown.", flush=True)
 
 app = FastAPI(title="DIA-Legal API", version="2.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# ── Lazy system loader ────────────────────────────────────────────
+def get_systems():
+    if not _systems:
+        print("[DIA-Legal] Loading ML systems...", flush=True)
+        _systems.update(_build_systems())
+        print("[DIA-Legal] ML systems ready.", flush=True)
+    return _systems
+
 # ── System bootstrap ──────────────────────────────────────────────
 def _build_systems():
+    print("Loading transformers...", flush=True)
+    from transformers import AutoTokenizer
+    from sentence_transformers import SentenceTransformer
+    print("Loading src modules...", flush=True)
+    from src.reader import ReaderRouter
+    from src.video_processor import VideoProcessor
+    from src.chunker import Chunker, PDFChunker
+    from src.embedder import MultiModalEmbedder, TextEmbedder, VisualEmbedder
+    from src.vectorstore import LanceDBVectorStore
+    from src.retriever import Retriever
+    from src.reranker import CrossEncoderReranker
+    from src.llmclient import LLMClient
+    from src.context_builder import ContextBuilder
+    from src.llm_answerer import LLMAnswerer
+    from src.pipeline import DIAPipeline
+    from src.query_router import QueryRouter
+    from src.ingestion import IngestionPipeline
+    from src.evidence_classifier import EvidenceClassifier, format_evidence_map
+    from src.contradiction_detector import ContradictionDetector, format_contradiction_report
+    from src.devils_advocate import DevilsAdvocate
+    from src.trial_brief_generator import TrialBriefGenerator
+    print("All modules imported", flush=True)
+
     tokenizer       = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-Instruct-v0.2")
     video_processor = VideoProcessor(base_output_path=BASE_STORAGE, model_size="base")
     chunker         = Chunker(max_duration=20, max_tokens=512, overlap_duration=5, tokenizer=tokenizer)
@@ -129,15 +135,19 @@ def _build_systems():
         storage_path=BASE_STORAGE
     )
 
+    # Store format_* functions for use in routes
+    _systems["_format_evidence_map"]          = format_evidence_map
+    _systems["_format_contradiction_report"]  = format_contradiction_report
+
     return {
-        "pipeline": pipeline,
-        "ingestion": ingestion_pipeline,
-        "evidence_classifier": evidence_classifier,
-        "contradiction_detector": contradiction_detector,
-        "devils_advocate": devils_advocate,
-        "brief_generator": brief_generator,
-        "retriever": retriever,
-        "embedder": embedder,
+        "pipeline":                pipeline,
+        "ingestion":               ingestion_pipeline,
+        "evidence_classifier":     evidence_classifier,
+        "contradiction_detector":  contradiction_detector,
+        "devils_advocate":         devils_advocate,
+        "brief_generator":         brief_generator,
+        "retriever":               retriever,
+        "embedder":                embedder,
     }
 
 # ── Cache helpers ─────────────────────────────────────────────────
@@ -212,6 +222,15 @@ class YouTubeIngestRequest(BaseModel):
 
 
 # ════════════════════════════════════════════════════════════════
+# HEALTH — no ML needed, always fast
+# ════════════════════════════════════════════════════════════════
+
+@app.get("/api/health")
+def health():
+    return {"status": "ok", "version": "2.0.0"}
+
+
+# ════════════════════════════════════════════════════════════════
 # ROUTES — CASES
 # ════════════════════════════════════════════════════════════════
 
@@ -221,10 +240,10 @@ def list_cases():
     result = []
     for cid, data in cases.items():
         result.append({
-            "case_id": cid,
+            "case_id":      cid,
             "source_count": len(data.get("sources", [])),
             "total_chunks": data.get("total_chunks", 0),
-            "sources": data.get("sources", []),
+            "sources":      data.get("sources", []),
         })
     return {"cases": result}
 
@@ -255,19 +274,15 @@ def delete_case(case_id: str):
 def ingest_youtube(body: YouTubeIngestRequest):
     case_id = body.case_id.strip()
     url     = body.url.strip()
-
-    cache = _load_cache()
-    key   = _cache_key(url, case_id)
+    cache   = _load_cache()
+    key     = _cache_key(url, case_id)
 
     if key in cache:
-        return {
-            "status": "cached",
-            "message": f"Already ingested — {cache[key].get('chunks', '?')} chunks",
-            "chunks": cache[key].get("chunks", 0)
-        }
+        return {"status": "cached", "chunks": cache[key].get("chunks", 0)}
 
     try:
-        result = get_systems()["ingestion"].ingest(source=url, case_id=case_id, storage_path=BASE_STORAGE)
+        s = get_systems()
+        result = s["ingestion"].ingest(source=url, case_id=case_id, storage_path=BASE_STORAGE)
         n = result.get("chunks_indexed", 0)
         cache[key] = {"source": url, "case_id": case_id, "chunks": n}
         _save_cache(cache)
@@ -278,10 +293,7 @@ def ingest_youtube(body: YouTubeIngestRequest):
 
 
 @app.post("/api/ingest/video")
-async def ingest_video(
-    case_id: str = Form(...),
-    file: UploadFile = File(...)
-):
+async def ingest_video(case_id: str = Form(...), file: UploadFile = File(...)):
     case_id = case_id.strip()
     tmp_dir = Path(BASE_STORAGE) / "tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -298,7 +310,8 @@ async def ingest_video(
         return {"status": "cached", "chunks": cache[key].get("chunks", 0)}
 
     try:
-        result = get_systems()["ingestion"].ingest(source=str(tmp_path), case_id=case_id, storage_path=BASE_STORAGE)
+        s = get_systems()
+        result = s["ingestion"].ingest(source=str(tmp_path), case_id=case_id, storage_path=BASE_STORAGE)
         n = result.get("chunks_indexed", 0)
         cache[key] = {"source": file.filename, "case_id": case_id, "chunks": n}
         _save_cache(cache)
@@ -311,16 +324,11 @@ async def ingest_video(
 
 
 @app.post("/api/ingest/pdf")
-async def ingest_pdf(
-    case_id: str = Form(...),
-    files: List[UploadFile] = File(...)
-):
+async def ingest_pdf(case_id: str = Form(...), files: List[UploadFile] = File(...)):
     case_id = case_id.strip()
     results = []
-
     tmp_dir = Path(BASE_STORAGE) / "tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
-
     cache = _load_cache()
 
     for file in files:
@@ -331,15 +339,12 @@ async def ingest_pdf(
         key = _cache_key(file.filename, case_id)
         if key in cache:
             tmp_path.unlink(missing_ok=True)
-            results.append({
-                "name": file.filename,
-                "status": "cached",
-                "chunks": cache[key].get("chunks", 0)
-            })
+            results.append({"name": file.filename, "status": "cached", "chunks": cache[key].get("chunks", 0)})
             continue
 
         try:
-            result = get_systems()["ingestion"].ingest(source=str(tmp_path), case_id=case_id, storage_path=BASE_STORAGE)
+            s = get_systems()
+            result  = s["ingestion"].ingest(source=str(tmp_path), case_id=case_id, storage_path=BASE_STORAGE)
             n       = result.get("chunks_indexed", 0)
             doctype = result.get("doc_type", "document")
             cache[key] = {"source": file.filename, "case_id": case_id, "chunks": n}
@@ -361,10 +366,8 @@ async def ingest_pdf(
 @app.post("/api/query")
 def query(body: QueryRequest):
     try:
-        result = get_systems()["pipeline"].run(
-            query=body.query.strip(),
-            case_id=body.case_id.strip()
-        )
+        s      = get_systems()
+        result = s["pipeline"].run(query=body.query.strip(), case_id=body.case_id.strip())
         return {
             "answer":     result.get("answer", ""),
             "citations":  result.get("citations", []),
@@ -382,11 +385,12 @@ def query(body: QueryRequest):
 @app.post("/api/evidence-map")
 def evidence_map(body: EvidenceMapRequest):
     try:
-        em  = get_systems()["evidence_classifier"].classify(
+        s   = get_systems()
+        em  = s["evidence_classifier"].classify(
             case_id=body.case_id.strip(),
             lawyer_position=body.lawyer_position.strip()
         )
-        fmt = format_evidence_map(em)
+        fmt = s["_format_evidence_map"](em)
         return {
             "supporting": fmt["supporting"]["rows"],
             "opposing":   fmt["opposing"]["rows"],
@@ -404,12 +408,10 @@ def evidence_map(body: EvidenceMapRequest):
 @app.post("/api/contradictions")
 def detect_contradictions(body: ContradictionRequest):
     try:
-        report = get_systems()["contradiction_detector"].detect(case_id=body.case_id.strip())
-        fmt    = format_contradiction_report(report)
-        return {
-            "contradictions": fmt["rows"],
-            "summary":        report.summary,
-        }
+        s      = get_systems()
+        report = s["contradiction_detector"].detect(case_id=body.case_id.strip())
+        fmt    = s["_format_contradiction_report"](report)
+        return {"contradictions": fmt["rows"], "summary": report.summary}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -421,9 +423,9 @@ def detect_contradictions(body: ContradictionRequest):
 @app.post("/api/devils-advocate/session")
 def da_new_session(body: DANewSessionRequest):
     try:
-        session = get_systems()["devils_advocate"].new_session(
-            case_id=body.case_id.strip(),
-            topic=body.topic.strip()
+        s       = get_systems()
+        session = s["devils_advocate"].new_session(
+            case_id=body.case_id.strip(), topic=body.topic.strip()
         )
         return {"session_id": session.session_id, "status": "created"}
     except Exception as e:
@@ -433,7 +435,8 @@ def da_new_session(body: DANewSessionRequest):
 @app.post("/api/devils-advocate/argue")
 def da_argue(body: DAArgueRequest):
     try:
-        da = get_systems()["devils_advocate"]
+        s      = get_systems()
+        da     = s["devils_advocate"]
         da.load_session(case_id=body.case_id.strip(), session_id=body.session_id.strip())
         result = da.argue(body.argument.strip())
         return {
@@ -451,7 +454,8 @@ def da_argue(body: DAArgueRequest):
 @app.get("/api/devils-advocate/sessions/{case_id}")
 def da_list_sessions(case_id: str):
     try:
-        sessions = get_systems()["devils_advocate"].list_sessions(case_id.strip())
+        s        = get_systems()
+        sessions = s["devils_advocate"].list_sessions(case_id.strip())
         return {"sessions": sessions}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -464,30 +468,31 @@ def da_list_sessions(case_id: str):
 @app.post("/api/brief")
 def generate_brief(body: BriefRequest):
     try:
-        brief = get_systems()["brief_generator"].generate(
+        s     = get_systems()
+        brief = s["brief_generator"].generate(
             case_id=body.case_id.strip(),
             lawyer_position=body.lawyer_position.strip()
         )
         return {
-            "brief_id":            brief.brief_id,
-            "case_strength":       brief.case_strength,
-            "case_summary":        brief.case_summary,
-            "overall_assessment":  brief.overall_assessment,
-            "critical_actions":    brief.critical_actions,
-            "witness_profiles":    [
+            "brief_id":           brief.brief_id,
+            "case_strength":      brief.case_strength,
+            "case_summary":       brief.case_summary,
+            "overall_assessment": brief.overall_assessment,
+            "critical_actions":   brief.critical_actions,
+            "witness_profiles": [
                 {
-                    "speaker_id":          w.speaker_id,
-                    "inferred_role":       w.inferred_role,
-                    "reliability_rating":  w.reliability_rating,
-                    "credibility_score":   w.credibility_score,
-                    "contradiction_count": w.contradiction_count,
+                    "speaker_id":           w.speaker_id,
+                    "inferred_role":        w.inferred_role,
+                    "reliability_rating":   w.reliability_rating,
+                    "credibility_score":    w.credibility_score,
+                    "contradiction_count":  w.contradiction_count,
                     "recommended_approach": w.recommended_approach,
                 }
                 for w in brief.witness_profiles
             ],
-            "contradictions":          brief.contradictions,
-            "recommended_questions":   brief.recommended_questions,
-            "pdf_path":                str(brief.pdf_path) if getattr(brief, "pdf_path", None) else None,
+            "contradictions":        brief.contradictions,
+            "recommended_questions": brief.recommended_questions,
+            "pdf_path":              str(brief.pdf_path) if getattr(brief, "pdf_path", None) else None,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -503,15 +508,6 @@ def download_brief(brief_id: str):
         media_type="application/pdf",
         filename=f"trial_brief_{brief_id}.pdf"
     )
-
-
-# ════════════════════════════════════════════════════════════════
-# HEALTH
-# ════════════════════════════════════════════════════════════════
-
-@app.get("/api/health")
-def health():
-    return {"status": "ok", "version": "2.0.0"}
 
 
 if __name__ == "__main__":
