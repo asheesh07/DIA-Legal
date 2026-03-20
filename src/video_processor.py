@@ -5,7 +5,7 @@ import cv2
 import uuid 
 import pytesseract 
 from whisperx.diarize import DiarizationPipeline
-from transformers import AutoProcessor,AutoModelForVision2Seq
+from transformers import AutoProcessor, AutoModelForImageTextToText as AutoModelForVision2Seq
 from pathlib import Path
 from PIL import Image    
 import os
