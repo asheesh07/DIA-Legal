@@ -47,7 +47,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 # ── Lazy system loader ────────────────────────────────────────────
 def get_systems():
     if not _systems:
