@@ -52,9 +52,15 @@ _systems = {}
 # ── Lifespan ──────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("[DIA-Legal] Initialising systems...")
-    _systems.update(_build_systems())
-    print("[DIA-Legal] Ready.")
+    print("[DIA-Legal] Initialising systems...", flush=True)
+    try:
+        _systems.update(_build_systems())
+        print("[DIA-Legal] Ready.", flush=True)
+    except Exception as e:
+        print(f"[DIA-Legal] STARTUP FAILED: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        raise
     yield
 
 app = FastAPI(title="DIA-Legal API", version="2.0.0", lifespan=lifespan)
@@ -261,7 +267,7 @@ def ingest_youtube(body: YouTubeIngestRequest):
         }
 
     try:
-        result = _systems["ingestion"].ingest(source=url, case_id=case_id, storage_path=BASE_STORAGE)
+        result = get_systems()["ingestion"].ingest(source=url, case_id=case_id, storage_path=BASE_STORAGE)
         n = result.get("chunks_indexed", 0)
         cache[key] = {"source": url, "case_id": case_id, "chunks": n}
         _save_cache(cache)
@@ -292,7 +298,7 @@ async def ingest_video(
         return {"status": "cached", "chunks": cache[key].get("chunks", 0)}
 
     try:
-        result = _systems["ingestion"].ingest(source=str(tmp_path), case_id=case_id, storage_path=BASE_STORAGE)
+        result = get_systems()["ingestion"].ingest(source=str(tmp_path), case_id=case_id, storage_path=BASE_STORAGE)
         n = result.get("chunks_indexed", 0)
         cache[key] = {"source": file.filename, "case_id": case_id, "chunks": n}
         _save_cache(cache)
@@ -333,7 +339,7 @@ async def ingest_pdf(
             continue
 
         try:
-            result = _systems["ingestion"].ingest(source=str(tmp_path), case_id=case_id, storage_path=BASE_STORAGE)
+            result = get_systems()["ingestion"].ingest(source=str(tmp_path), case_id=case_id, storage_path=BASE_STORAGE)
             n       = result.get("chunks_indexed", 0)
             doctype = result.get("doc_type", "document")
             cache[key] = {"source": file.filename, "case_id": case_id, "chunks": n}
@@ -355,7 +361,7 @@ async def ingest_pdf(
 @app.post("/api/query")
 def query(body: QueryRequest):
     try:
-        result = _systems["pipeline"].run(
+        result = get_systems()["pipeline"].run(
             query=body.query.strip(),
             case_id=body.case_id.strip()
         )
@@ -376,7 +382,7 @@ def query(body: QueryRequest):
 @app.post("/api/evidence-map")
 def evidence_map(body: EvidenceMapRequest):
     try:
-        em  = _systems["evidence_classifier"].classify(
+        em  = get_systems()["evidence_classifier"].classify(
             case_id=body.case_id.strip(),
             lawyer_position=body.lawyer_position.strip()
         )
@@ -398,7 +404,7 @@ def evidence_map(body: EvidenceMapRequest):
 @app.post("/api/contradictions")
 def detect_contradictions(body: ContradictionRequest):
     try:
-        report = _systems["contradiction_detector"].detect(case_id=body.case_id.strip())
+        report = get_systems()["contradiction_detector"].detect(case_id=body.case_id.strip())
         fmt    = format_contradiction_report(report)
         return {
             "contradictions": fmt["rows"],
@@ -415,7 +421,7 @@ def detect_contradictions(body: ContradictionRequest):
 @app.post("/api/devils-advocate/session")
 def da_new_session(body: DANewSessionRequest):
     try:
-        session = _systems["devils_advocate"].new_session(
+        session = get_systems()["devils_advocate"].new_session(
             case_id=body.case_id.strip(),
             topic=body.topic.strip()
         )
@@ -427,7 +433,7 @@ def da_new_session(body: DANewSessionRequest):
 @app.post("/api/devils-advocate/argue")
 def da_argue(body: DAArgueRequest):
     try:
-        da = _systems["devils_advocate"]
+        da = get_systems()["devils_advocate"]
         da.load_session(case_id=body.case_id.strip(), session_id=body.session_id.strip())
         result = da.argue(body.argument.strip())
         return {
@@ -445,7 +451,7 @@ def da_argue(body: DAArgueRequest):
 @app.get("/api/devils-advocate/sessions/{case_id}")
 def da_list_sessions(case_id: str):
     try:
-        sessions = _systems["devils_advocate"].list_sessions(case_id.strip())
+        sessions = get_systems()["devils_advocate"].list_sessions(case_id.strip())
         return {"sessions": sessions}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -458,7 +464,7 @@ def da_list_sessions(case_id: str):
 @app.post("/api/brief")
 def generate_brief(body: BriefRequest):
     try:
-        brief = _systems["brief_generator"].generate(
+        brief = get_systems()["brief_generator"].generate(
             case_id=body.case_id.strip(),
             lawyer_position=body.lawyer_position.strip()
         )
