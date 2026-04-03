@@ -125,25 +125,23 @@ class YTReader(BaseReader):
             original_name=title,
             stored_path=stored_path,
             created_at= datetime.utcnow(),
-            status= "stored"
+            status= "streamed"
         )
         
         return asset
     def _download_yt_video(self,url,output_path):
         
         ydl_opts = {
-        "format": "bestvideo+bestaudio/best",
-        "outtmpl": os.path.join(output_path, "%(id)s.%(ext)s"),
-        "merge_output_format": "mp4",
+        "format": "best",
         "quiet": True,
     }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            file_path = str(ydl.prepare_filename(info))
+            info = ydl.extract_info(url, download=False)
+            stream_url = info.get('url', url)
             title = info.get('title','UNKNOWN')
 
-        return file_path,title
+        return stream_url,title
 class LocalReader(BaseReader):
     Allowed_extensions ={".mp4", ".mov", ".mkv", ".avi", ".webm"}
     def validate(self, source):

@@ -141,7 +141,7 @@ def _build_systems():
         "mistralai/Mistral-7B-Instruct-v0.2"
     )
     video_processor = VideoProcessor(
-        base_output_path=BASE_STORAGE, model_size="base"
+        base_output_path=BASE_STORAGE, model_size="tiny"
     )
     chunker = Chunker(
         max_duration=20, max_tokens=512,
@@ -1509,4 +1509,5 @@ with gr.Blocks(
     """)
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860, share=False)
+    port = int(os.environ.get("PORT", 8000))
+    demo.launch(server_name="0.0.0.0", server_port=port, share=False)

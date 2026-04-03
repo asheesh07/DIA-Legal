@@ -81,7 +81,7 @@ def _build_systems():
     print("All modules imported", flush=True)
 
     tokenizer       = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-Instruct-v0.2")
-    video_processor = VideoProcessor(base_output_path=BASE_STORAGE, model_size="base")
+    video_processor = VideoProcessor(base_output_path=BASE_STORAGE, model_size="tiny")
     chunker         = Chunker(max_duration=20, max_tokens=512, overlap_duration=5, tokenizer=tokenizer)
     pdf_chunker     = PDFChunker(max_tokens=512, overlap_tokens=50)
 
@@ -511,4 +511,5 @@ def download_brief(brief_id: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)

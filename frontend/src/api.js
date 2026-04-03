@@ -1,7 +1,7 @@
 import axios from 'axios'
 
 const api = axios.create({ 
-  baseURL: 'https://dia-legal-1.onrender.com/api/'
+  baseURL: '/api'
 })
 
 export const getCases = () => api.get('/cases')

@@ -1,17 +1,17 @@
 @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500&display=swap');
 
 :root {
-  --bg:      #07070f;
-  --bg2:     #0d0d1a;
-  --bg3:     #121220;
-  --bg4:     #17172a;
-  --border:  #222235;
-  --border2: #2e2e50;
+  --bg:      #0a0a0f;
+  --bg2:     #111118;
+  --bg3:     #1a1a24;
+  --bg4:     #222230;
+  --border:  #2a2a3d;
+  --border2: #3a3a55;
   --gold:    #c9a84c;
   --gold2:   #e2c070;
-  --text:    #ddddf0;
-  --text2:   #7777aa;
-  --text3:   #444460;
+  --text:    #f0f0fa;
+  --text2:   #a0a0c0;
+  --text3:   #606080;
   --green:   #2ecc71;
   --red:     #e74c3c;
   --amber:   #f39c12;

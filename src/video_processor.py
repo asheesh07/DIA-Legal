@@ -121,7 +121,7 @@ class VideoProcessor:
             for seg in result["segments"]
         ]
 
-    def video_to_images(self, asset, strategy="Hybrid", interval_sec: int = 1):
+    def video_to_images(self, asset, strategy="Hybrid", interval_sec: int = 5):
         path       = asset.stored_path
         frames_dir = self.base_output_path / asset.case_id / "frames" / asset.evidence_id
         frames_dir.mkdir(parents=True, exist_ok=True)
