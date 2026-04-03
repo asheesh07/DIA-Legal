@@ -1,7 +1,13 @@
 import axios from 'axios'
 
+const rawApiUrl = import.meta.env.VITE_API_URL;
+const cleanApiUrl = rawApiUrl ? (rawApiUrl.endsWith('/') ? rawApiUrl.slice(0, -1) : rawApiUrl) : '';
+const finalBaseUrl = cleanApiUrl 
+  ? (cleanApiUrl.endsWith('/api') ? cleanApiUrl : `${cleanApiUrl}/api`) 
+  : '/api';
+
 const api = axios.create({ 
-  baseURL: import.meta.env.VITE_API_URL || '/api'
+  baseURL: finalBaseUrl
 })
 
 export const getCases = () => api.get('/cases')
