@@ -4,9 +4,9 @@ class QueryRouter:
 
         query_lower = query.lower()
 
-        if "contradict" in query_lower:
+        if "contradict" in query_lower or "opposition" in query_lower:
             mode = "opposition"
-        elif "summarize" in query_lower:
+        elif "summarize" in query_lower or "summary" in query_lower or "summarise" in query_lower:
             mode = "assistant"
         else:
             mode = "evidence"

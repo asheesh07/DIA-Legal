@@ -129,19 +129,50 @@ class YTReader(BaseReader):
         )
         
         return asset
-    def _download_yt_video(self,url,output_path):
-        
-        ydl_opts = {
-        "format": "best",
-        "quiet": True,
-    }
+    def _download_yt_video(self, url, output_path):
+        # Prefer a single progressive stream (audio+video combined).
+        # YouTube mostly serves DASH (separate streams) so we
+        # explicitly ask for a non-DASH MP4 first, then fall back
+        # to any progressive format, then fall back to best-audio URL
+        # for the audio path (cv2 frame extraction degrades gracefully).
+        FORMATS = [
+            "best[ext=mp4][protocol!*=dash]",   # progressive MP4
+            "best[protocol!*=dash]",             # any progressive
+            "bestaudio[ext=m4a]/bestaudio",      # audio-only fallback
+            "best",                              # last resort
+        ]
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            stream_url = info.get('url', url)
-            title = info.get('title','UNKNOWN')
+        info = None
+        for fmt in FORMATS:
+            try:
+                ydl_opts = {"format": fmt, "quiet": True}
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                stream_url = info.get("url") or self._pick_url_from_formats(info)
+                if stream_url:
+                    break
+            except Exception:
+                continue
 
-        return stream_url,title
+        if not stream_url:
+            stream_url = url  # absolute last resort — let ffmpeg try native
+
+        title = (info or {}).get("title", "UNKNOWN")
+        print(f"[YTReader] Streaming from URL (length≈{len(stream_url)}): {stream_url[:80]}…", flush=True)
+        return stream_url, title
+
+    def _pick_url_from_formats(self, info):
+        """Return the first format URL that contains both audio and video."""
+        for fmt in reversed(info.get("formats", [])):
+            if (fmt.get("url")
+                    and fmt.get("acodec") != "none"
+                    and fmt.get("vcodec") != "none"):
+                return fmt["url"]
+        # fall back to any URL
+        for fmt in reversed(info.get("formats", [])):
+            if fmt.get("url"):
+                return fmt["url"]
+        return None
 class LocalReader(BaseReader):
     Allowed_extensions ={".mp4", ".mov", ".mkv", ".avi", ".webm"}
     def validate(self, source):
@@ -236,27 +267,32 @@ class PDFReader(BaseReader):
         self, pdf_path: str
     ) -> List[Tuple[int, str]]:
         """
-        Returns list of (page_number, cleaned_text).
-        Tables are flattened to text so they are searchable.
-        Page numbers are 1-indexed.
+        Returns list of (page_number, cleaned_text), pages processed in parallel.
+        Text and tables are extracted in a single pass per page.
         """
-        results = []
+        from concurrent.futures import ThreadPoolExecutor
+
         with pdfplumber.open(pdf_path) as pdf:
-            for page_num, page in enumerate(pdf.pages, start=1):
+            n_pages = len(pdf.pages)
+
+        def _process_page(page_num: int) -> Tuple[int, str]:
+            # Each thread opens its own handle to avoid shared-state issues.
+            with pdfplumber.open(pdf_path) as pdf:
+                page = pdf.pages[page_num - 1]
                 text = page.extract_text() or ""
                 text = self._clean_text(text)
-
-                # Flatten tables into searchable text
                 tables = page.extract_tables() or []
                 for table in tables:
                     for row in table:
                         cells = [str(c).strip() for c in row if c]
                         text += "\n" + " | ".join(cells)
+            return page_num, text.strip()
 
-                if text.strip():
-                    results.append((page_num, text.strip()))
+        workers = min(n_pages, 8)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(_process_page, range(1, n_pages + 1)))
 
-        return results
+        return [(pn, text) for pn, text in results if text]
 
     def _clean_text(self, text: str) -> str:
         if not text:

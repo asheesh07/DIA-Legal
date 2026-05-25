@@ -3,11 +3,10 @@ from typing import List,Dict
 from src.reader import PDFAsset, LegalSection
 import re
 class Chunker:
-    def __init__(self,max_duration:int=20,max_tokens:int=512,overlap_duration:int=5,tokenizer=None):
+    def __init__(self,max_duration:int=20,max_tokens:int=512,overlap_duration:int=5):
         self.max_duration= max_duration
         self.max_tokens=max_tokens
         self.overlap_duration = overlap_duration
-        self.tokenizer = tokenizer
         
     def _estimate_tokens(self,text):
         return len(text.split())
@@ -23,16 +22,17 @@ class Chunker:
                     texts.append(frame["ocr_text"])
         return " ".join(texts)
     
-    def _build_transcripts(self,segments):
+    def _build_transcripts(self, segments):
         transcripts = []
         for seg in segments:
             transcripts.append({
-                "start":seg['start'],
-                'end':seg['end'],
-                'text':seg['transcript'],
-                'speaker':seg['speaker']
+                "start":           seg['start'],
+                "end":             seg['end'],
+                "text":            seg['transcript'],
+                "speaker":         seg['speaker'],
+                "timestamp_start": seg.get('timestamp_start', ''),
+                "timestamp_end":   seg.get('timestamp_end', ''),
             })
-        
         return transcripts
     def _build_frames(self,segments):
         frames =[]

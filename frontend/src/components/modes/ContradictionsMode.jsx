@@ -1,89 +1,139 @@
-import { useState } from 'react'
-import { detectContradictions } from '../../api'
-import './ContradictionsMode.css'
+import { useState } from 'react';
+import { detectContradictions } from '@/api';
+import { ModeFrame } from '@/components/shared/ModeFrame';
+import { EmptyState } from '@/components/shared/EmptyState';
+import { SkeletonCard } from '@/components/shared/SkeletonCard';
+import { ContradictionCard } from '@/components/shared/ContradictionCard';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent } from '@/components/ui/card';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { AlertTriangle, RefreshCw } from 'lucide-react';
+import { toast } from 'sonner';
+import { cn } from '@/lib/utils';
 
-const SEV_COLOR = { HIGH: '#e74c3c', MEDIUM: '#f39c12', LOW: '#2ecc71' }
+// Maps new dict API format → ContradictionCard props
+function toCardProps(c) {
+  return {
+    severity:          c.severity,
+    speaker_a:         c.speaker_a,
+    timestamp_a:       c.timestamp_a,
+    source_name_a:     c.source_name_a,
+    speaker_b:         c.speaker_b,
+    timestamp_b:       c.timestamp_b,
+    source_name_b:     c.source_name_b,
+    claim:             c.statement_a,
+    claim_citation:    { ref: c.citation_a, type: 'transcript' },
+    evidence:          c.statement_b,
+    evidence_citation: { ref: c.citation_b, type: 'transcript' },
+    explanation:       c.explanation,
+    is_cross_source:   c.is_cross_source,
+  };
+}
+
+const SEVERITY_TABS = ['all', 'high', 'medium', 'low'];
 
 export default function ContradictionsMode({ caseId }) {
-  const [rows, setRows]       = useState([])
-  const [summary, setSummary] = useState(null)
-  const [loading, setLoading] = useState(false)
-  const [error, setError]     = useState('')
+  const [contradictions, setContradictions] = useState([]);
+  const [summary, setSummary] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState('all');
 
   const run = async () => {
-    if (!caseId.trim()) return
-    setLoading(true)
-    setError('')
+    if (!caseId) { toast.error('No case selected'); return; }
+    setLoading(true);
     try {
-      const res = await detectContradictions(caseId)
-      setRows(res.data.contradictions)
-      setSummary(res.data.summary)
+      const res = await detectContradictions(caseId);
+      setContradictions(res.data.contradictions);
+      setSummary(res.data.summary);
+      setActiveTab('all');
     } catch (e) {
-      setError(e.response?.data?.detail || e.message)
+      toast.error(e.response?.data?.detail || e.message);
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
-  }
+  };
+
+  const countFor = (sev) =>
+    sev === 'all'
+      ? contradictions.length
+      : contradictions.filter(c => c.severity === sev).length;
+
+  const filtered =
+    activeTab === 'all'
+      ? contradictions
+      : contradictions.filter(c => c.severity === activeTab);
+
+  const crossCount = contradictions.filter(c => c.is_cross_source).length;
 
   return (
-    <div className="mode-page">
-      <div className="mode-topbar">
-        <div>
-          <h2 className="mode-title">Contradictions</h2>
-          <p className="mode-sub">{caseId}</p>
-        </div>
-        <button className="run-btn" onClick={run} disabled={loading}>
-          {loading ? 'Detecting...' : 'Detect contradictions'}
-        </button>
-      </div>
-
-      {error && <div className="error-bar">{error}</div>}
-
-      {summary && (
-        <div className="summary-bar">
-          <span className="sev-badge" style={{color: SEV_COLOR.HIGH}}>{summary.high_severity} high</span>
-          <span className="sev-badge" style={{color: SEV_COLOR.MEDIUM}}>{summary.medium_severity} medium</span>
-          <span className="sev-badge" style={{color: SEV_COLOR.LOW}}>{summary.low_severity} low</span>
-          <span className="sev-badge">{summary.cross_source} cross-source</span>
-          <span className="sev-badge muted">{summary.statements_checked} statements checked</span>
+    <ModeFrame
+      title="Contradictions"
+      subtitle={caseId || 'No case selected'}
+      actions={
+        <Button onClick={run} disabled={loading || !caseId}>
+          <RefreshCw className={cn('w-4 h-4 mr-2', loading && 'animate-spin')} />
+          {loading ? 'Detecting…' : contradictions.length ? 'Re-run' : 'Detect contradictions'}
+        </Button>
+      }
+    >
+      {loading && (
+        <div className="space-y-4">
+          {[1, 2, 3].map(i => <SkeletonCard key={i} rows={3} />)}
         </div>
       )}
 
-      {rows.length > 0 ? (
-        <div className="contradiction-list">
-          {rows.map((row, i) => {
-            const sev = row[0]?.replace(/[🔴🟡🟢⚪]/g, '').trim().toUpperCase()
-            return (
-              <div key={i} className="contradiction-card">
-                <div className="contra-header">
-                  <span className="contra-sev" style={{ color: SEV_COLOR[sev] || '#888' }}>
-                    {row[0]}
-                  </span>
-                  {row[6] === '✅' && <span className="cross-badge">cross-source</span>}
-                </div>
-                <div className="contra-body">
-                  <div className="contra-col">
-                    <p className="contra-cite">{row[1]}</p>
-                    <p className="contra-text">{row[2]}</p>
-                  </div>
-                  <div className="contra-vs">vs</div>
-                  <div className="contra-col">
-                    <p className="contra-cite">{row[3]}</p>
-                    <p className="contra-text">{row[4]}</p>
-                  </div>
-                </div>
-                <p className="contra-explanation">{row[5]}</p>
-              </div>
-            )
-          })}
-        </div>
-      ) : (
-        !loading && !error && (
-          <div className="empty-state">
-            <p>Run detection to find contradictions across all case sources</p>
+      {!loading && contradictions.length === 0 && (
+        <EmptyState
+          icon={AlertTriangle}
+          title="Find contradictions"
+          description="Runs a two-stage analysis: embedding similarity filter, then LLM verification across all case sources."
+        />
+      )}
+
+      {!loading && summary && (
+        <div className="space-y-6">
+          {/* Stats row */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+            {[
+              { label: 'Total', count: summary.total_contradictions ?? contradictions.length, cls: 'text-foreground' },
+              { label: 'High', count: summary.high_severity, cls: 'text-destructive' },
+              { label: 'Medium', count: summary.medium_severity, cls: 'text-warning' },
+              { label: 'Low', count: summary.low_severity, cls: 'text-success' },
+              { label: 'Cross-source', count: crossCount, cls: 'text-primary' },
+              { label: 'Stmts checked', count: summary.statements_checked, cls: 'text-muted-foreground' },
+            ].map(s => (
+              <Card key={s.label}>
+                <CardContent className="p-3">
+                  <div className={cn('text-2xl font-bold tabular-nums', s.cls)}>{s.count}</div>
+                  <div className="text-xs text-muted-foreground mt-0.5 leading-tight">{s.label}</div>
+                </CardContent>
+              </Card>
+            ))}
           </div>
-        )
+
+          {/* Severity filter tabs */}
+          <Tabs value={activeTab} onValueChange={setActiveTab}>
+            <TabsList>
+              {SEVERITY_TABS.map(tab => (
+                <TabsTrigger key={tab} value={tab} className="capitalize">
+                  {tab} ({countFor(tab)})
+                </TabsTrigger>
+              ))}
+            </TabsList>
+
+            <TabsContent value={activeTab} className="space-y-4 mt-4">
+              {filtered.length === 0 && (
+                <p className="text-sm text-muted-foreground text-center py-8">
+                  No contradictions at this severity level.
+                </p>
+              )}
+              {filtered.map((c, i) => (
+                <ContradictionCard key={i} contradiction={toCardProps(c)} />
+              ))}
+            </TabsContent>
+          </Tabs>
+        </div>
       )}
-    </div>
-  )
+    </ModeFrame>
+  );
 }

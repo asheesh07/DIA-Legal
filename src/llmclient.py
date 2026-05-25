@@ -17,9 +17,9 @@ class LLMClient:
 
     def __init__(
         self,
-        model: str = "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        model: str = "meta-llama/Llama-3.1-8B-Instruct",
         temperature: float = 0.2,
-        max_tokens: int = 800,
+        max_tokens: int = 300,
         api_token: str | None = None
     ):
 
@@ -55,8 +55,6 @@ class LLMClient:
         citation_map = context_package["citation_map"]
 
         full_prompt = f"""
-{system_prompt}
-
 EVIDENCE BLOCKS:
 {context_text}
 
@@ -64,6 +62,9 @@ EVIDENCE BLOCKS:
 """
 
         start_time = time.time()
+        print("--- FULL PROMPT LENGTH ---", len(full_prompt), flush=True)
+        if len(full_prompt) < 1000:
+            print("--- FULL PROMPT ---", full_prompt, flush=True)
 
         try:
             response = self.client.chat_completion(
@@ -95,7 +96,14 @@ EVIDENCE BLOCKS:
                 llm_confidence = 0.5
                 
         except Exception as e:
-            raise RuntimeError(f"LLM generation failed: {str(e)}")
+            error_str = str(e)
+            print("HF ERROR:", error_str, flush=True)
+            if "validation error" in error_str.lower() or "bad request" in error_str.lower():
+                answer_text = "The context was too large for the LLM to process. Try asking a more specific query."
+            else:
+                answer_text = f"LLM generation failed: {error_str}"
+            cited_blocks = []
+            llm_confidence = 0.0
 
         latency = round(float(time.time() - start_time), 3)
 
@@ -157,11 +165,15 @@ EVIDENCE BLOCKS:
                         metadata.get("start_time", 0),
                         metadata.get("end_time", 0)
                     ],
+                    "speakers":  metadata.get("speakers", []),
                     # PDF
                     "page_start":    metadata.get("page_start", 0),
                     "page_end":      metadata.get("page_end", 0),
                     "section_title": metadata.get("section_title", ""),
                     "source_type":   metadata.get("source_type", ""),
+                    "original_name": metadata.get("original_name", ""),
+                    "exhibit_id":    metadata.get("exhibit_id", ""),
+                    "exhibit_title": metadata.get("exhibit_title", ""),
                 })
 
         return valid
@@ -205,6 +217,7 @@ EVIDENCE BLOCKS:
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
+            print("HF FILTER ERROR:", str(e), flush=True)
             raise RuntimeError(f"Classification failed: {e}")
 
     # ============================================================

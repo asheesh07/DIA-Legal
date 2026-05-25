@@ -32,9 +32,9 @@ class LLMAnswerer:
             mode=mode
         )
 
-        if not result["citations"]:
+        if not result.get("answer"):
             return self._refuse(
-                reason="No valid evidence citations produced",
+                reason="Model failed to generate an answer",
                 retrieval_confidence=retrieval_confidence
             )
 

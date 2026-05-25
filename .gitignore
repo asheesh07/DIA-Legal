@@ -3,19 +3,56 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.egg-info/
+dist/
+build/
 
 # Virtual environments
 venv/
+.venv/
+env/
+
+# Environment
 .env
+# (keep .env.example committed)
 
 # Mac
 .DS_Store
+.AppleDouble
 
-# Data
+# Data (runtime, do not commit)
 data/
-.env
 
+# Node
 node_modules/
 frontend/node_modules/
 frontend/dist/
+.vite/
+
+# Vite temp files
+frontend/vite.config.js.timestamp-*.mjs
+
+# Logs
+*.log
+app.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Type checker cache
+.mypy_cache/
+
+# Claude Code local settings
+.claude/
+
+# Scratch / dev-only scripts (not needed for deployment)
+scratch/
+demo_full_test.py
+eval_runner.py
+DEMO_SCRIPT.md
+
+# Test data files
+test_*.pdf
 

@@ -3,6 +3,7 @@ import re
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
 from src.context_builder import ContextBuilder
+from src.citation_utils import is_pdf_chunk, build_citation_ref, source_type_label
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -102,7 +103,7 @@ class EvidenceClassifier:
     def classify(
         self,
         case_id: str,
-        lawyer_position: str,
+        lawyer_position: str = "",
     ) -> EvidenceMap:
         """
         Main entry point.
@@ -152,9 +153,17 @@ class EvidenceClassifier:
                 else:
                     evidence_map.neutral.append(evidence_item)
 
-            except Exception:
+            except Exception as e:
+                print(f"[EvidenceClassifier] chunk failed: {e}", flush=True)
                 evidence_map.failed_classifications += 1
                 continue
+
+        print(
+            f"[EvidenceClassifier] {evidence_map.total_chunks_classified} chunks → "
+            f"S={len(evidence_map.supporting)} O={len(evidence_map.opposing)} "
+            f"N={len(evidence_map.neutral)} failed={evidence_map.failed_classifications}",
+            flush=True,
+        )
 
         # 3. Sort each list by strength descending
         evidence_map.supporting.sort(
@@ -176,10 +185,10 @@ class EvidenceClassifier:
         lawyer_position: str,
     ) -> Optional[EvidenceItem]:
 
-        is_pdf   = self._is_pdf_chunk(item)
+        is_pdf   = is_pdf_chunk(item)
         text     = self._extract_text(item)
         speaker  = self._extract_speaker(item)
-        cite_ref = self._build_citation_ref(item)
+        cite_ref = build_citation_ref(item)
 
         if not text.strip():
             return None
@@ -216,8 +225,8 @@ class EvidenceClassifier:
             chunk_id       = item.chunk_ids[0] if item.chunk_ids else "",
 
             # Video fields
-            start_time = item.temporal.primary.start_time,
-            end_time   = item.temporal.primary.end_time,
+            start_time = getattr(getattr(getattr(item, "temporal", None), "primary", None), "start_time", 0.0) or 0.0,
+            end_time   = getattr(getattr(getattr(item, "temporal", None), "primary", None), "end_time",   0.0) or 0.0,
 
             # PDF fields
             section_title = meta.get("section_title", ""),
@@ -244,7 +253,7 @@ class EvidenceClassifier:
         meta = getattr(item, "metadata", {})
 
         if is_pdf:
-            source_label = self._source_type_label(
+            source_label = source_type_label(
                 meta.get("source_type", "document")
             )
             section = meta.get("section_title", "")
@@ -306,7 +315,7 @@ Rules:
         raw = re.sub(r"```json|```", "", raw).strip()
 
         # Extract JSON object
-        match = re.search(r"\{.*?\}", raw, re.DOTALL)
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
         if not match:
             return None
 
@@ -344,75 +353,23 @@ Rules:
     # Helpers — mirrors context_builder logic
     # ─────────────────────────────────────────────────────────────
 
-    def _is_pdf_chunk(self, item) -> bool:
-        if item.structured_transcripts:
-            speaker = item.structured_transcripts[0].get(
-                "speaker", ""
-            )
-            if speaker == "DOCUMENT":
-                return True
-        return (
-            item.temporal.primary.start_time == 0.0 and
-            item.temporal.primary.end_time == 0.0
-        )
-
     def _extract_text(self, item) -> str:
         texts = []
-        for seg in item.structured_transcripts:
+        for seg in getattr(item, "structured_transcripts", []):
             t = seg.get("text", "").strip()
             if t:
                 texts.append(t)
         return " ".join(texts)
 
     def _extract_speaker(self, item) -> str:
-        if item.structured_transcripts:
-            return item.structured_transcripts[0].get(
-                "speaker", "UNKNOWN"
-            )
+        meta = getattr(item, "metadata", {})
+        if meta.get("source_type") in ("fir", "witness_statement", "document", "pdf"):
+            return "DOCUMENT"
+        for seg in getattr(item, "structured_transcripts", []):
+            sp = seg.get("speaker", "")
+            if sp and sp not in ("UNKNOWN", ""):
+                return sp
         return "UNKNOWN"
-
-    def _build_citation_ref(self, item) -> str:
-        if self._is_pdf_chunk(item):
-            meta          = getattr(item, "metadata", {})
-            source_type   = meta.get("source_type", "document")
-            section_title = meta.get("section_title", "")
-            page_start    = meta.get("page_span_start", 0)
-            page_end      = meta.get("page_span_end", 0)
-
-            label = self._source_type_label(source_type)
-            parts = [label]
-            if section_title:
-                parts.append(f"§ {section_title}")
-            if page_start and page_end:
-                page_str = (
-                    f"p.{page_start}" if page_start == page_end
-                    else f"pp.{page_start}-{page_end}"
-                )
-                parts.append(page_str)
-            return "[" + " · ".join(parts) + "]"
-        else:
-            s  = item.temporal.primary.start_time
-            e  = item.temporal.primary.end_time
-            sm, ss = int(s) // 60, int(s) % 60
-            em, es = int(e) // 60, int(e) % 60
-            return f"[{sm:02d}:{ss:02d} → {em:02d}:{es:02d}]"
-
-    def _source_type_label(self, source_type: str) -> str:
-        labels = {
-            "fir":               "FIR",
-            "witness_statement": "Witness Statement",
-            "court_order":       "Court Order",
-            "evidence":          "Evidence Report",
-            "charge_sheet":      "Charge Sheet",
-            "document":          "Document",
-            "video":             "Video",
-            "Youtube":           "Video",
-            "Local":             "Video",
-        }
-        return labels.get(
-            source_type,
-            source_type.replace("_", " ").title()
-        )
 
 
 # ─────────────────────────────────────────────────────────────────

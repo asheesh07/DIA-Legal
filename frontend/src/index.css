@@ -1,54 +1,100 @@
-@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
-:root {
-  --bg:      #0a0a0f;
-  --bg2:     #111118;
-  --bg3:     #1a1a24;
-  --bg4:     #222230;
-  --border:  #2a2a3d;
-  --border2: #3a3a55;
-  --gold:    #c9a84c;
-  --gold2:   #e2c070;
-  --text:    #f0f0fa;
-  --text2:   #a0a0c0;
-  --text3:   #606080;
-  --green:   #2ecc71;
-  --red:     #e74c3c;
-  --amber:   #f39c12;
-  --font-serif: 'Playfair Display', serif;
-  --font-mono:  'IBM Plex Mono', monospace;
-  --font-sans:  'IBM Plex Sans', sans-serif;
+@layer base {
+  :root {
+    --background: 210 40% 98%; /* slate-50 */
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 234 89% 55%; /* indigo-600 */
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%; /* slate-100 */
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%; /* slate-200 */
+    --input: 214.3 31.8% 91.4%;
+    --ring: 234 89% 55%;
+    --radius: 0.5rem;
+    --success: 142.1 76.2% 36.3%; /* emerald-600 */
+    --success-foreground: 210 40% 98%;
+    --warning: 38 92% 50%; /* amber-500 */
+    --warning-foreground: 48 96% 89%;
+  }
+
+  .dark {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+    --card: 222.2 84% 4.9%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222.2 84% 4.9%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 234 89% 55%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 212.7 26.8% 83.9%;
+    --success: 142.1 76.2% 36.3%;
+    --success-foreground: 210 40% 98%;
+    --warning: 38 92% 50%;
+    --warning-foreground: 48 96% 89%;
+  }
 }
 
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-body {
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--font-sans);
-  font-size: 14px;
-  line-height: 1.6;
-  -webkit-font-smoothing: antialiased;
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-sans;
+  }
 }
 
-button { cursor: pointer; font-family: var(--font-sans); }
-input, textarea, select {
-  font-family: var(--font-sans);
-  background: var(--bg4);
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-radius: 4px;
-  padding: 8px 12px;
-  font-size: 13px;
-  transition: border-color 0.15s;
-  outline: none;
-  width: 100%;
-}
-input:focus, textarea:focus, select:focus {
-  border-color: var(--gold);
-  box-shadow: 0 0 0 2px rgba(201,168,76,0.08);
-}
+@media print {
+  /* Hide navigation chrome */
+  .print-hide {
+    display: none !important;
+  }
 
-::-webkit-scrollbar { width: 4px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+  /* Reset layout so brief content flows naturally */
+  body,
+  #root,
+  .flex.h-screen {
+    height: auto !important;
+    overflow: visible !important;
+    display: block !important;
+  }
+
+  /* Show only the brief content area */
+  .brief-content {
+    display: block !important;
+  }
+
+  /* Reasonable A4 margins */
+  .print-root main {
+    overflow: visible !important;
+    padding: 0 !important;
+  }
+
+  /* Page breaks between major sections */
+  .brief-content > * {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+}

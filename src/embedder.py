@@ -4,11 +4,27 @@ from torch import no_grad
 from transformers import CLIPProcessor,CLIPModel
 from PIL import Image
 class TextEmbedder:
-    def __init__(self,model,batch_size,normalize):
-        self.model = model
-        self.embed_dims=self.model.get_sentence_embedding_dimension() 
+    def __init__(self, model_name: str, batch_size: int, normalize: bool):
+        self.model_name = model_name
+        self._model = None
+        self._embed_dims = None
         self.batch_size = batch_size
-        self.normalize =normalize
+        self.normalize = normalize
+
+    @property
+    def model(self):
+        if self._model is None:
+            from sentence_transformers import SentenceTransformer
+            print(f"[TextEmbedder] Loading {self.model_name}...", flush=True)
+            self._model = SentenceTransformer(self.model_name)
+            self._embed_dims = self._model.get_sentence_embedding_dimension()
+        return self._model
+
+    @property
+    def embed_dims(self):
+        if self._embed_dims is None:
+            self._embed_dims = self.model.get_sentence_embedding_dimension()
+        return self._embed_dims
     def embed(self,text):
         if not text.strip():
             return np.zeros(self.embed_dims)
@@ -71,12 +87,30 @@ class TextEmbedder:
     
 class VisualEmbedder:
     def __init__(self,model_name,device,normalize):
+        self.model_name = model_name
         self.device=device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.normalize= normalize
-        self.processor = CLIPProcessor.from_pretrained(model_name)
-        self.model= CLIPModel.from_pretrained(model_name).to(self.device)
-        self.embed_dim = self.model.config.projection_dim
-        self.model.eval()
+        self._processor = None
+        self._model = None
+        self.embed_dim = 512
+
+    @property
+    def processor(self):
+        if self._processor is None:
+            from transformers import CLIPProcessor
+            print(f"[VisualEmbedder] Loading processor {self.model_name}...", flush=True)
+            self._processor = CLIPProcessor.from_pretrained(self.model_name, use_fast=True)
+        return self._processor
+
+    @property
+    def model(self):
+        if self._model is None:
+            from transformers import CLIPModel
+            print(f"[VisualEmbedder] Loading model {self.model_name}...", flush=True)
+            self._model = CLIPModel.from_pretrained(self.model_name).to(self.device)
+            self._model.eval()
+            self.embed_dim = self._model.config.projection_dim
+        return self._model
         
     def embed_image(self,image_path):
         try:

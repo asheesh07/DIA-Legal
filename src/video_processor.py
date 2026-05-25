@@ -1,13 +1,19 @@
-import subprocess  
-import torch 
-import cv2      
-import uuid 
-import pytesseract 
+import subprocess
+import torch
+import uuid
+import pytesseract
 from pathlib import Path
-from PIL import Image    
+from PIL import Image
 import os
+import concurrent.futures
 
 HF_TOKEN = os.getenv("HF_TOKEN")
+
+_STREAM_PREFIXES = ("http://", "https://", "rtmp://", "rtsp://")
+
+
+def _is_stream(path: str) -> bool:
+    return isinstance(path, str) and path.startswith(_STREAM_PREFIXES)
 
 
 class VideoProcessor:
@@ -17,13 +23,10 @@ class VideoProcessor:
         self.dtype = "float16" if self.device == "cuda" else "float32"
         self.model_size = model_size
 
-        # Lazy — not loaded until first use
         self._model = None
         self._diarize_model = None
         self._processor = None
         self._caption_model = None
-        self.align_model = None
-        self.align_metadata = None
 
     # ── Lazy properties ──────────────────────────────────────────
 
@@ -69,37 +72,165 @@ class VideoProcessor:
 
     # ── Public API ────────────────────────────────────────────────
 
-    def process(self, asset):
-        audio_path    = self.video_to_audio(asset)
-        transcript    = self.audio_to_text(audio_path)
-        frames        = self.video_to_images(asset)
-        analysed      = self.analyse_frames(frames)
-        aligned_data  = self.aligned_modalities(analysed, transcript, asset.case_id)
-        return aligned_data
+    def process(self, asset, progress=None):
+        def emit(stage):
+            if progress:
+                progress(stage)
+
+        path = str(asset.stored_path)
+
+        if _is_stream(path):
+            # YouTube: audio and frames both come from the stream URL via FFmpeg
+            emit("extracting_audio")
+            audio_path = self.video_to_audio(asset)
+            emit("sampling_frames")
+            frames = self.video_to_images(asset)
+        else:
+            # Local file: run audio extraction and frame sampling concurrently
+            emit("extracting_audio")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                audio_fut = pool.submit(self.video_to_audio, asset)
+                frame_fut = pool.submit(self.video_to_images, asset)
+                audio_path = audio_fut.result()
+                frames = frame_fut.result()
+
+        emit("transcribing")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            transcript_fut = pool.submit(self.audio_to_text, audio_path)
+            frames_fut     = pool.submit(self.analyse_frames, frames)
+            transcript = transcript_fut.result()
+            analysed   = frames_fut.result()
+        emit("chunking")
+        return self.aligned_modalities(analysed, transcript, asset.case_id)
+
+    def process_from_files(self, audio_path: str, frames_dir: Path,
+                           case_id: str, evidence_id: str, progress=None):
+        """
+        ML-only pipeline used when FFmpeg has already produced audio + frames
+        (streaming upload path — no asset object needed).
+        """
+        def emit(stage):
+            if progress:
+                progress(stage)
+
+        frames_metadata = self._collect_frames(frames_dir, interval_sec=30)
+
+        emit("transcribing")
+        transcript = self.audio_to_text(audio_path)
+        emit("diarizing")
+        analysed = self.analyse_frames(frames_metadata)
+        emit("chunking")
+        return self.aligned_modalities(analysed, transcript, case_id)
+
+    # ── Audio ─────────────────────────────────────────────────────
 
     def video_to_audio(self, asset):
         audio_dir = self.base_output_path / asset.case_id / "audio"
         audio_dir.mkdir(parents=True, exist_ok=True)
-        output_audio_path = audio_dir / f"{asset.evidence_id}.wav"
+        out = audio_dir / f"{asset.evidence_id}.wav"
 
-        ffmpeg_command = [
+        cmd = [
             "ffmpeg", "-y", "-i", str(asset.stored_path),
-            "-vn", "-ac", "1", "-ar", "16000", "-f", "wav",
-            str(output_audio_path)
+            "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", str(out)
         ]
         try:
-            subprocess.run(ffmpeg_command, stdout=subprocess.PIPE,
-                           stderr=subprocess.PIPE, check=True)
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
         except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"FFmpeg failed: {e.stderr.decode()}")
+            raise RuntimeError(f"FFmpeg audio failed: {e.stderr.decode()}")
 
-        if not output_audio_path.exists():
-            raise RuntimeError("Audio extraction failed")
-        return str(output_audio_path)
+        if not out.exists():
+            raise RuntimeError("Audio extraction produced no output")
+        return str(out)
+
+    # ── Frames ────────────────────────────────────────────────────
+
+    def video_to_images(self, asset, interval_sec: int = 30):
+        path = str(asset.stored_path)
+        frames_dir = (
+            self.base_output_path / asset.case_id / "frames" / asset.evidence_id
+        )
+        frames_dir.mkdir(parents=True, exist_ok=True)
+
+        if _is_stream(path):
+            return self._frames_from_stream(path, frames_dir, interval_sec)
+        return self._frames_from_local(path, frames_dir, interval_sec)
+
+    def _frames_from_stream(self, stream_url: str, frames_dir: Path, interval_sec: int):
+        """Sample 1 frame every N seconds from a stream URL via FFmpeg thumbnail filter."""
+        pattern = str(frames_dir / "%04d.jpg")
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", stream_url,
+            "-vf", f"thumbnail,fps=1/{interval_sec}",
+            "-vsync", "vfr",
+            pattern,
+        ]
+        try:
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        except subprocess.CalledProcessError as e:
+            print(
+                f"[VideoProcessor] Stream frame extraction failed: "
+                f"{e.stderr.decode()[:200]}",
+                flush=True,
+            )
+            return []
+        return self._collect_frames(frames_dir, interval_sec)
+
+    def _frames_from_local(self, video_path: str, frames_dir: Path, interval_sec: int):
+        """Extract scene-change frames at 640px width from a local file."""
+        pattern = str(frames_dir / "%04d.jpg")
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-vf", "select='gt(scene,0.3)',scale=640:-1",
+            "-vsync", "vfr",
+            pattern,
+        ]
+        try:
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        except subprocess.CalledProcessError as e:
+            print(
+                f"[VideoProcessor] Local frame extraction failed: "
+                f"{e.stderr.decode()[:200]}",
+                flush=True,
+            )
+            return []
+        return self._collect_frames(frames_dir, interval_sec)
+
+    def _collect_frames(self, frames_dir: Path, interval_sec: int) -> list:
+        jpegs = sorted(frames_dir.glob("*.jpg"))
+        return [
+            {
+                "frame_id":   str(uuid.uuid4()),
+                "timestamp":  float(i * interval_sec),
+                "image_path": jpg,
+            }
+            for i, jpg in enumerate(jpegs)
+        ]
+
+    # ── Transcription ─────────────────────────────────────────────
+
+    @staticmethod
+    def _format_ts(sec: float) -> str:
+        sec = max(0, int(sec))
+        h, rem = divmod(sec, 3600)
+        m, s = divmod(rem, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
+
+    @staticmethod
+    def _map_speakers(segments: list) -> dict:
+        seen: dict = {}
+        roles = ["Q", "A", "W1", "W2", "W3"]
+        for seg in segments:
+            sp = seg.get("speaker", "UNKNOWN")
+            if sp and sp not in ("UNKNOWN", "") and sp not in seen:
+                idx = len(seen)
+                seen[sp] = roles[idx] if idx < len(roles) else sp
+        return seen
 
     def audio_to_text(self, audio_path):
         import whisperx
-        result   = self.model.transcribe(audio_path)
+        result = self.model.transcribe(audio_path)
         language = result.get("language", "en")
 
         model_a, metadata = whisperx.load_align_model(
@@ -111,7 +242,7 @@ class VideoProcessor:
         diarize_segments = self.diarize_model(audio_path)
         result = whisperx.assign_word_speakers(diarize_segments, result)
 
-        return [
+        raw = [
             {
                 "start_time": seg["start"],
                 "end_time":   seg["end"],
@@ -120,72 +251,59 @@ class VideoProcessor:
             }
             for seg in result["segments"]
         ]
-
-    def video_to_images(self, asset, strategy="Hybrid", interval_sec: int = 5):
-        path       = asset.stored_path
-        frames_dir = self.base_output_path / asset.case_id / "frames" / asset.evidence_id
-        frames_dir.mkdir(parents=True, exist_ok=True)
-
-        cap = cv2.VideoCapture(path)
-        if not cap.isOpened():
-            raise RuntimeError("Failed to load the video")
-
-        fps            = cap.get(cv2.CAP_PROP_FPS)
-        frame_interval = int(fps * interval_sec)
-        frames_metadata = []
-        frame_count = saved_count = 0
-
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            if frame_count % frame_interval == 0:
-                timestamp      = frame_count / fps
-                frame_filename = f"{saved_count:04d}_{timestamp:.3f}.jpg"
-                frame_path     = frames_dir / frame_filename
-                cv2.imwrite(str(frame_path), frame)
-                frames_metadata = [{
-                    "frame_id":   str(uuid.uuid4()),
-                    "timestamp":  timestamp,
-                    "image_path": frame_path,
-                }]
-                saved_count += 1
-            frame_count += 1
-
-        cap.release()
-        return frames_metadata
-
-    def analyse_frames(self, frames_metadata):
+        speaker_map = self._map_speakers(raw)
         return [
             {
-                "frame_id":   frame["frame_id"],
-                "timestamp":  frame["timestamp"],
-                "image_path": frame["image_path"],
-                "ocr_text":   self.extract_text(frame["image_path"]),
-                "caption":    self.generate_captions(frame["image_path"]),
+                "start_time":      s["start_time"],
+                "end_time":        s["end_time"],
+                "text":            s["text"],
+                "speaker":         speaker_map.get(s["speaker"], s["speaker"]),
+                "timestamp_start": self._format_ts(s["start_time"]),
+                "timestamp_end":   self._format_ts(s["end_time"]),
             }
-            for frame in frames_metadata
+            for s in raw
         ]
 
-    def extract_text(self, path):
-        image = cv2.imread(str(path))
-        return pytesseract.image_to_string(image).strip()
+    # ── Frame analysis ────────────────────────────────────────────
 
-    def generate_captions(self, path):
-        image  = Image.open(path).convert("RGB")
-        inputs = self.processor(image, return_tensors="pt")
-        out    = self.caption_model.generate(**inputs)
-        return self.processor.decode(out[0], skip_special_tokens=True)
+    def analyse_frames(self, frames_metadata):
+        images = []
+        for f in frames_metadata:
+            images.append(Image.open(f["image_path"]).convert("RGB"))
+            f["ocr_text"] = self._ocr(f["image_path"])
+            f["caption"] = ""
+
+        if images:
+            batch_size = 16
+            for i in range(0, len(images), batch_size):
+                batch = images[i : i + batch_size]
+                inputs = self.processor(images=batch, return_tensors="pt").to(self.device)
+                with torch.no_grad():
+                    out = self.caption_model.generate(**inputs)
+                captions = self.processor.batch_decode(out, skip_special_tokens=True)
+                for j, cap in enumerate(captions):
+                    frames_metadata[i + j]["caption"] = cap
+
+        return frames_metadata
+
+    def _ocr(self, path):
+        import cv2
+        img = cv2.imread(str(path))
+        return pytesseract.image_to_string(img).strip() if img is not None else ""
+
+    # ── Alignment ─────────────────────────────────────────────────
 
     def aligned_modalities(self, frames, transcript, case_id, buffer=0.5):
         frames = sorted(frames, key=lambda x: x["timestamp"])
         return [
             {
-                "case_id":   case_id,
-                "start":     seg["start_time"],
-                "end":       seg["end_time"],
-                "transcript": seg["text"],
-                "speaker":   seg["speaker"],
+                "case_id":         case_id,
+                "start":           seg["start_time"],
+                "end":             seg["end_time"],
+                "transcript":      seg["text"],
+                "speaker":         seg["speaker"],
+                "timestamp_start": seg.get("timestamp_start", ""),
+                "timestamp_end":   seg.get("timestamp_end", ""),
                 "frames": [
                     f for f in frames
                     if (seg["start_time"] - buffer) <= f["timestamp"] <= (seg["end_time"] + buffer)

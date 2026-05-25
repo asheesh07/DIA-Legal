@@ -3,6 +3,7 @@ import re
 import numpy as np
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
+from src.citation_utils import is_pdf_chunk, build_citation_ref
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -13,47 +14,41 @@ from typing import List, Dict, Optional, Tuple
 class Statement:
     """A single statement from any source."""
     text:        str
-    speaker:     str        # SPEAKER_01 | DOCUMENT
-    source_type: str        # video | fir | witness_statement | etc.
-    citation_ref: str       # [01:36 → 02:14] or [Witness Statement · §2]
+    speaker:     str
+    source_type: str
+    citation_ref: str
     embedding:   np.ndarray
 
-    # Video-specific
-    start_time:  float = 0.0
-    end_time:    float = 0.0
-    chunk_id:    str   = ""
-
-    # PDF-specific
-    section_title: str = ""
-    original_name: str = ""
-    page_start:    int = 0
-    page_end:      int = 0
+    start_time:    float = 0.0
+    end_time:      float = 0.0
+    chunk_id:      str   = ""
+    section_title: str   = ""
+    original_name: str   = ""
+    page_start:    int   = 0
+    page_end:      int   = 0
 
 
 @dataclass
 class Contradiction:
     """A verified contradiction between two statements."""
-
-    # The two conflicting statements
     statement_a: Statement
     statement_b: Statement
 
-    # LLM verdict
-    explanation: str        # Why they contradict
-    severity:    str        # high | medium | low
-    severity_score: int     # 3=high 2=medium 1=low
+    explanation:        str
+    severity:           str    # high | medium | low
+    severity_score:     int    # 3=high 2=medium 1=low
+    conflict_score:     float  # 0.0–1.0
+    conflict_type:      str    # location/time/identity/action/factual
+    legal_significance: str
 
-    # Cross-source flag
-    is_cross_source: bool   # True if video vs PDF
+    is_cross_source: bool
 
 
 @dataclass
 class ContradictionReport:
     """Full contradiction analysis for a case."""
     case_id: str
-
-    contradictions: List[Contradiction] = field(default_factory=list)
-
+    contradictions:           List[Contradiction] = field(default_factory=list)
     total_statements_checked: int = 0
     total_pairs_flagged:      int = 0
     total_llm_calls:          int = 0
@@ -65,7 +60,6 @@ class ContradictionReport:
         medium = [c for c in self.contradictions if c.severity == "medium"]
         low    = [c for c in self.contradictions if c.severity == "low"]
         cross  = [c for c in self.contradictions if c.is_cross_source]
-
         return {
             "total_contradictions": len(self.contradictions),
             "high_severity":        len(high),
@@ -79,19 +73,67 @@ class ContradictionReport:
 
 
 # ─────────────────────────────────────────────────────────────────
+# Source-type exclusion
+# ─────────────────────────────────────────────────────────────────
+
+_EXCLUDED_SOURCE_TYPES = {"generated", "brief", "summary"}
+_GENERATED_PREFIX      = "DIA-Legal processed"
+
+# ─────────────────────────────────────────────────────────────────
+# Pre-compiled patterns for Stage 2
+# ─────────────────────────────────────────────────────────────────
+
+_NEG_RE = re.compile(
+    r"\b(not|never|no|wasn't|didn't|couldn't|hadn't|isn't|aren't|weren't|"
+    r"cannot|can't|won't|wouldn't|denied?|refus\w+|absent|false)\b",
+    re.IGNORECASE,
+)
+
+_CONFLICT_PAIRS: List[Tuple[str, str]] = [
+    (r"\byes\b|\bagreed?\b|\bconfirmed?\b|\badmitted?\b",
+     r"\bno\b|\bdenied?\b|\brefused?\b|\brejected?\b"),
+    (r"\bpresent\b|\battended?\b|\barrived?\b|\bwas there\b",
+     r"\babsent\b|\bnever came\b|\bdidn't come\b|\bnot present\b"),
+    (r"\bsaw\b|\bwitnessed?\b|\bobserved?\b|\bnoticed?\b",
+     r"\bdidn't see\b|\bnever saw\b|\bdid not see\b|\bdid not witness\b"),
+    (r"\bguilty\b|\bresponsible\b|\bcommitted\b",
+     r"\binnocent\b|\bnot guilty\b|\bdid not commit\b"),
+    (r"\bstruck\b|\bhit\b|\battacked?\b|\bassaulted?\b",
+     r"\bdid not (?:strike|hit|attack|assault)\b|\bnever (?:struck|hit)\b"),
+    (r"\bwas\b|\bwere\b|\bis\b|\bare\b",
+     r"\bwas not\b|\bwere not\b|\bis not\b|\bare not\b|\bwasn't\b|\bweren't\b"),
+]
+
+_TIME_RE  = re.compile(
+    r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm|o'clock)?\b"
+    r"|\b(?:morning|afternoon|evening|night|midnight|noon)\b",
+    re.IGNORECASE,
+)
+_LOC_RE   = re.compile(r"\b(?:at|in|near|inside|outside)\s+([A-Za-z][a-z]{2,})\b")
+_PROPER_RE = re.compile(r"\b[A-Z][a-z]{2,}\b")
+_STOPWORDS = {
+    "the", "this", "that", "his", "her", "its", "their", "our",
+    "my", "your", "any", "some", "one", "two", "also", "even",
+}
+
+
+# ─────────────────────────────────────────────────────────────────
 # Contradiction Detector
 # ─────────────────────────────────────────────────────────────────
 
 class ContradictionDetector:
     """
-    Detects contradictions across video testimony and PDF documents.
+    Four-stage contradiction detection pipeline:
 
-    Two-stage approach:
-    Stage 1 — Embedding filter: fast, free, finds suspicious pairs
-    Stage 2 — LLM verification: confirms real contradictions
-
-    Cross-source: compares video speaker statements against
-    PDF document chunks (witness statement vs video testimony).
+    Stage 1 — Pair generation: all pairs from indexed chunks, up to 200.
+               No similarity filter.
+    Stage 2 — Keyword conflict filter: keeps pairs with at least one
+               opposing signal (negation asymmetry, conflict pair
+               patterns, time/location divergence, shared entity +
+               negation).
+    Stage 3 — LLM verification: structured JSON verdict per pair.
+    Stage 4 — Cross-source boost: +0.1 to conflict_score when the
+               contradiction spans two different documents.
     """
 
     def __init__(
@@ -99,190 +141,143 @@ class ContradictionDetector:
         retriever,
         llm_client,
         embedder,
-        similarity_threshold: float = 0.4,
+        similarity_threshold: float = 0.3,  # kept for API compat, not used
         top_k: int = 100,
     ):
-        self.retriever            = retriever
-        self.llm_client           = llm_client
-        self.embedder             = embedder
-        self.similarity_threshold = similarity_threshold
-        self.top_k                = top_k
+        self.retriever = retriever
+        self.llm_client = llm_client
+        self.embedder = embedder
+        self.top_k = top_k
 
     # ─────────────────────────────────────────────────────────────
     # Public API
     # ─────────────────────────────────────────────────────────────
 
     def detect(self, case_id: str) -> ContradictionReport:
-        """
-        Main entry point.
-        Runs full contradiction detection for a case.
-
-        Args:
-            case_id: Case to analyze.
-
-        Returns:
-            ContradictionReport sorted by severity descending.
-        """
-
         report = ContradictionReport(case_id=case_id)
 
-        # 1. Retrieve all chunks for this case
         all_items = self.retriever.retrieve(
             case_id=case_id,
-            query="testimony statement evidence",
+            query="testimony statement evidence fact location time",
             top_k=self.top_k,
         )
-
         if not all_items:
             return report
 
-        # 2. Build Statement objects from chunks
         statements = self._build_statements(all_items)
         report.total_statements_checked = len(statements)
 
-        # 3. Split into video and PDF statements
-        video_statements = [
-            s for s in statements
-            if s.source_type in ("video", "Youtube", "Local")
-        ]
-        pdf_statements = [
-            s for s in statements
-            if s.source_type not in ("video", "Youtube", "Local")
-        ]
-
-        # 4. Stage 1 — find suspicious pairs via embeddings
-        suspicious_pairs: List[Tuple[Statement, Statement, bool]] = []
-
-        # Within video: same speaker contradictions
-        same_speaker_pairs = self._find_same_speaker_pairs(
-            video_statements
-        )
-        suspicious_pairs.extend(
-            [(a, b, False) for a, b in same_speaker_pairs]
-        )
-
-        # Cross source: video vs PDF
-        if video_statements and pdf_statements:
-            cross_pairs = self._find_cross_source_pairs(
-                video_statements, pdf_statements
-            )
-            suspicious_pairs.extend(
-                [(a, b, True) for a, b in cross_pairs]
-            )
-
-        report.total_pairs_flagged = len(suspicious_pairs)
-
-        if not suspicious_pairs:
+        if len(statements) < 2:
+            print(f"[ContradictionDetector] Only {len(statements)} statement(s) — need ≥ 2.", flush=True)
             return report
 
-        # 5. Stage 2 — LLM verification
-        for stmt_a, stmt_b, is_cross in suspicious_pairs:
-            report.total_llm_calls += 1
-
-            try:
-                contradiction = self._verify_contradiction(
-                    stmt_a, stmt_b, is_cross
+        # Stage 1: generate all pairs up to 200
+        all_pairs: List[Tuple[Statement, Statement, bool]] = []
+        for i in range(len(statements)):
+            for j in range(i + 1, len(statements)):
+                if len(all_pairs) >= 200:
+                    break
+                same_doc = (
+                    statements[i].original_name == statements[j].original_name
+                    and statements[i].original_name != ""
                 )
-                if contradiction is not None:
-                    report.contradictions.append(contradiction)
-            except Exception:
-                report.failed_verifications += 1
-                continue
+                all_pairs.append((statements[i], statements[j], not same_doc))
+            if len(all_pairs) >= 200:
+                break
 
-        # 6. Sort by severity descending
-        severity_order = {"high": 3, "medium": 2, "low": 1}
-        report.contradictions.sort(
-            key=lambda x: severity_order.get(x.severity, 0),
-            reverse=True
+        # Stage 2: keyword conflict filter
+        suspicious_pairs = [
+            (a, b, is_cross)
+            for a, b, is_cross in all_pairs
+            if self._keyword_conflict_filter(a.text, b.text)
+        ]
+
+        report.total_pairs_flagged = len(suspicious_pairs)
+        print(
+            f"[ContradictionDetector] {len(statements)} statements → "
+            f"{len(all_pairs)} pairs → {len(suspicious_pairs)} passed keyword filter",
+            flush=True,
         )
 
+        if not suspicious_pairs:
+            print("[ContradictionDetector] ⚠️ No pairs passed keyword filter.", flush=True)
+            return report
+
+        # Stage 3: LLM verification
+        for stmt_a, stmt_b, is_cross in suspicious_pairs:
+            report.total_llm_calls += 1
+            try:
+                contradiction = self._verify_contradiction(stmt_a, stmt_b, is_cross)
+                if contradiction is not None:
+                    report.contradictions.append(contradiction)
+            except Exception as exc:
+                print(f"[ContradictionDetector] LLM error: {exc}", flush=True)
+                report.failed_verifications += 1
+
+        # Deduplicate: keep the highest-scoring contradiction per exhibit-ID pair
+        seen: Dict[Tuple[str, str], int] = {}
+        deduped: List[Contradiction] = []
+        for contra in report.contradictions:
+            key_a = contra.statement_a.original_name or contra.statement_a.citation_ref
+            key_b = contra.statement_b.original_name or contra.statement_b.citation_ref
+            key = tuple(sorted([key_a, key_b]))
+            existing_idx = seen.get(key)
+            if existing_idx is None:
+                seen[key] = len(deduped)
+                deduped.append(contra)
+            elif contra.conflict_score > deduped[existing_idx].conflict_score:
+                deduped[existing_idx] = contra
+        report.contradictions = deduped
+
+        # Sort by conflict_score descending
+        report.contradictions.sort(key=lambda x: x.conflict_score, reverse=True)
         return report
 
     # ─────────────────────────────────────────────────────────────
-    # Stage 1A — Same speaker pairs (within video)
+    # Stage 2 — Keyword conflict filter
     # ─────────────────────────────────────────────────────────────
 
-    def _find_same_speaker_pairs(
-        self, video_statements: List[Statement]
-    ) -> List[Tuple[Statement, Statement]]:
-        """
-        Groups video statements by speaker.
-        Flags pairs with low cosine similarity.
-        Low similarity = semantically different = potential contradiction.
-        """
+    def _keyword_conflict_filter(self, text_a: str, text_b: str) -> bool:
+        a_lower = text_a.lower()
+        b_lower = text_b.lower()
 
-        # Group by speaker
-        by_speaker: Dict[str, List[Statement]] = {}
-        for stmt in video_statements:
-            spk = stmt.speaker
-            if spk not in by_speaker:
-                by_speaker[spk] = []
-            by_speaker[spk].append(stmt)
+        # 1. Negation asymmetry
+        a_neg = bool(_NEG_RE.search(a_lower))
+        b_neg = bool(_NEG_RE.search(b_lower))
+        if a_neg != b_neg:
+            return True
 
-        suspicious: List[Tuple[Statement, Statement]] = []
+        # 2. Direct conflict pair patterns
+        for pos_pat, neg_pat in _CONFLICT_PAIRS:
+            a_pos = bool(re.search(pos_pat, a_lower, re.IGNORECASE))
+            b_neg_ = bool(re.search(neg_pat, b_lower, re.IGNORECASE))
+            b_pos = bool(re.search(pos_pat, b_lower, re.IGNORECASE))
+            a_neg_ = bool(re.search(neg_pat, a_lower, re.IGNORECASE))
+            if (a_pos and b_neg_) or (b_pos and a_neg_):
+                return True
 
-        for speaker, stmts in by_speaker.items():
-            if speaker == "DOCUMENT" or len(stmts) < 2:
-                continue
+        # 3. Time conflict: both mention times that differ
+        times_a = set(m.group().lower() for m in _TIME_RE.finditer(a_lower))
+        times_b = set(m.group().lower() for m in _TIME_RE.finditer(b_lower))
+        if times_a and times_b and not times_a.intersection(times_b):
+            return True
 
-            # Pairwise cosine similarity
-            for i in range(len(stmts)):
-                for j in range(i + 1, len(stmts)):
-                    sim = self._cosine_similarity(
-                        stmts[i].embedding,
-                        stmts[j].embedding
-                    )
-                    # Low similarity = semantically different
-                    if sim < self.similarity_threshold:
-                        suspicious.append((stmts[i], stmts[j]))
+        # 4. Location conflict: different locations in both texts
+        locs_a = {m.group(1).lower() for m in _LOC_RE.finditer(text_a)} - _STOPWORDS
+        locs_b = {m.group(1).lower() for m in _LOC_RE.finditer(text_b)} - _STOPWORDS
+        if locs_a and locs_b and not locs_a.intersection(locs_b):
+            return True
 
-        return suspicious
+        # 5. Shared proper noun with negation asymmetry
+        proper_a = {w.lower() for w in _PROPER_RE.findall(text_a)} - _STOPWORDS
+        proper_b = {w.lower() for w in _PROPER_RE.findall(text_b)} - _STOPWORDS
+        if (proper_a & proper_b) and (a_neg != b_neg):
+            return True
 
-    # ─────────────────────────────────────────────────────────────
-    # Stage 1B — Cross source pairs (video vs PDF)
-    # ─────────────────────────────────────────────────────────────
-
-    def _find_cross_source_pairs(
-        self,
-        video_statements: List[Statement],
-        pdf_statements: List[Statement],
-    ) -> List[Tuple[Statement, Statement]]:
-        """
-        Compares each video statement against all PDF chunks.
-        Flags pairs with low cosine similarity.
-
-        Low similarity between a video statement and a PDF chunk
-        about the same topic = potential contradiction between
-        spoken testimony and written document.
-        """
-
-        suspicious: List[Tuple[Statement, Statement]] = []
-
-        for v_stmt in video_statements:
-            if v_stmt.speaker == "DOCUMENT":
-                continue
-
-            for p_stmt in pdf_statements:
-                # Skip very short PDF chunks — not enough context
-                if len(p_stmt.text.split()) < 10:
-                    continue
-
-                sim = self._cosine_similarity(
-                    v_stmt.embedding,
-                    p_stmt.embedding
-                )
-
-                # For cross-source use slightly higher threshold
-                # because different phrasing is expected
-                cross_threshold = self.similarity_threshold + 0.1
-
-                if sim < cross_threshold:
-                    suspicious.append((v_stmt, p_stmt))
-
-        return suspicious
+        return False
 
     # ─────────────────────────────────────────────────────────────
-    # Stage 2 — LLM verification
+    # Stage 3 — LLM verification
     # ─────────────────────────────────────────────────────────────
 
     def _verify_contradiction(
@@ -291,140 +286,144 @@ class ContradictionDetector:
         stmt_b: Statement,
         is_cross_source: bool,
     ) -> Optional[Contradiction]:
-        """
-        Sends suspicious pair to LLM for verification.
-        Returns Contradiction if confirmed, None if not.
-        """
-
-        prompt = self._build_verification_prompt(
-            stmt_a, stmt_b, is_cross_source
-        )
-
+        prompt = self._build_verification_prompt(stmt_a, stmt_b)
         raw = self.llm_client.classify(prompt)
         parsed = self._parse_verification(raw)
 
-        if parsed is None:
+        if parsed is None or not parsed["is_contradiction"]:
             return None
 
-        if not parsed["is_contradiction"]:
-            return None
+        # Stage 4: cross-source boost
+        score = min(1.0, parsed["conflict_score"] + (0.1 if is_cross_source else 0.0))
 
         return Contradiction(
-            statement_a     = stmt_a,
-            statement_b     = stmt_b,
-            explanation     = parsed["explanation"],
-            severity        = parsed["severity"],
-            severity_score  = {"high": 3, "medium": 2, "low": 1}.get(
-                parsed["severity"], 1
-            ),
-            is_cross_source = is_cross_source,
+            statement_a        = stmt_a,
+            statement_b        = stmt_b,
+            explanation        = parsed["explanation"],
+            severity           = parsed["severity"],
+            severity_score     = {"high": 3, "medium": 2, "low": 1}.get(parsed["severity"], 1),
+            conflict_score     = score,
+            conflict_type      = parsed["conflict_type"],
+            legal_significance = parsed["legal_significance"],
+            is_cross_source    = is_cross_source,
         )
 
-    # ─────────────────────────────────────────────────────────────
-    # Prompt builder
-    # ─────────────────────────────────────────────────────────────
+    def _build_verification_prompt(self, stmt_a: Statement, stmt_b: Statement) -> str:
+        exhibit_a = stmt_a.citation_ref or stmt_a.original_name or stmt_a.source_type
+        exhibit_b = stmt_b.citation_ref or stmt_b.original_name or stmt_b.source_type
+        ts_a = self._fmt_ts(stmt_a.start_time) if stmt_a.start_time else "document"
+        ts_b = self._fmt_ts(stmt_b.start_time) if stmt_b.start_time else "document"
 
-    def _build_verification_prompt(
-        self,
-        stmt_a: Statement,
-        stmt_b: Statement,
-        is_cross_source: bool,
-    ) -> str:
+        return f"""You are a precise legal contradiction detector. Determine whether these two case statements assert mutually exclusive facts.
 
-        if is_cross_source:
-            context_label = (
-                "These statements come from DIFFERENT sources — "
-                "one from video testimony, one from a written document."
-            )
-        else:
-            context_label = (
-                "Both statements are from the SAME person "
-                "at different points in the proceedings."
-            )
+Statement A [{exhibit_a} · {ts_a}]:
+{stmt_a.text}
 
-        return f"""Analyze the following evidence snippets.
-Identify contradictions or inconsistencies.
+Statement B [{exhibit_b} · {ts_b}]:
+{stmt_b.text}
 
-{context_label}
+A real contradiction requires ALL three conditions:
+1. Both statements refer to the SAME entity, person, or physical object.
+2. Both statements refer to the SAME event, time period, or circumstance.
+3. The facts they assert are MUTUALLY EXCLUSIVE — they cannot both be true simultaneously.
 
-STATEMENT A:
-Source: {stmt_a.source_type}
-Speaker/Document: {stmt_a.speaker}
-Citation: {stmt_a.citation_ref}
-"{stmt_a.text}"
+Do NOT flag any of these as contradictions:
+- Statements about different dates, time periods, or separate incidents.
+- A summary or brief that references or paraphrases a source document.
+- Statements that are unrelated but happen to share a common word or name.
+- Where one statement is a subset, elaboration, or more detailed version of the other.
+- Statements expressing different opinions or interpretations of the same fact.
 
-STATEMENT B:
-Source: {stmt_b.source_type}
-Speaker/Document: {stmt_b.speaker}
-Citation: {stmt_b.citation_ref}
-"{stmt_b.text}"
+Severity guidelines:
+- "high": directly undermines a sworn statement, alibi, or chain of custody — damaging in court.
+- "medium": likely factual conflict with clear legal relevance, but some ambiguity remains.
+- "low": possible inconsistency that could have an innocent explanation.
 
-Respond ONLY in this exact JSON format:
+Respond with JSON only — no text before or after:
 {{
-    "contradiction_pairs": true,
-    "explanation": "Identify contradictions or inconsistencies between the pairs",
-    "severity": "high/medium/low"
+  "is_contradiction": true,
+  "severity": "high",
+  "conflict_score": 0.85,
+  "conflict_type": "factual",
+  "explanation": "one sentence explaining the specific mutually exclusive fact",
+  "legal_significance": "one sentence on why this matters in court"
 }}
 
-Rules:
-- contradiction_pairs: true if they contradict, false otherwise
-- explanation: one sentence explaining the exact conflict
-- severity: "high" (direct factual conflict), "medium" (likely conflict), "low" (possible conflict)
-- No text outside the JSON"""
+conflict_type must be one of: location / time / identity / action / factual"""
 
     # ─────────────────────────────────────────────────────────────
     # Statement builder
     # ─────────────────────────────────────────────────────────────
 
     def _build_statements(self, items) -> List[Statement]:
-        """
-        Converts retrieved items into Statement objects.
-        Embeds each statement's text for similarity comparison.
-        """
         statements = []
 
         for item in items:
-            is_pdf = self._is_pdf_chunk(item)
-            meta   = getattr(item, "metadata", {})
-
+            meta                  = getattr(item, "metadata", {})
             structured_transcripts = getattr(item, "structured_transcripts", [])
+            cite_ref              = build_citation_ref(item)
+            original_name         = meta.get("original_name", "")
+            source_type           = meta.get("source_type", "video")
+
+            # Skip generated/AI-summary chunks — they paraphrase real evidence and
+            # create false contradictions against the originals they summarise.
+            if source_type in _EXCLUDED_SOURCE_TYPES:
+                continue
+            raw_text_preview = (getattr(item, "transcript_text", "") or "")
+            if raw_text_preview.startswith(_GENERATED_PREFIX):
+                continue
+            if not original_name:
+                continue
+
+            built_any = False
             for seg in structured_transcripts:
                 text = seg.get("text", "").strip()
                 if not text or len(text.split()) < 5:
                     continue
 
-                # Embed the text
                 try:
                     embedding = self.embedder.text_embedder.embed(text)
                 except Exception:
-                    continue
+                    embedding = np.zeros(384, dtype=np.float32)
 
-                speaker     = seg.get("speaker", "UNKNOWN")
-                source_type = meta.get("source_type", "video")
-                cite_ref    = self._build_citation_ref(item)
-
-                stmt = Statement(
-                    text         = text,
-                    speaker      = speaker,
-                    source_type  = source_type,
-                    citation_ref = cite_ref,
-                    embedding    = embedding,
-
-                    # Video fields
-                    start_time = seg.get("start", 0.0),
-                    end_time   = seg.get("end", 0.0),
-                    chunk_id   = (
-                        getattr(item, "chunk_ids", [""])[0] if getattr(item, "chunk_ids", None) else ""
-                    ),
-
-                    # PDF fields
+                built_any = True
+                statements.append(Statement(
+                    text          = text,
+                    speaker       = seg.get("speaker", "UNKNOWN"),
+                    source_type   = source_type,
+                    citation_ref  = cite_ref,
+                    embedding     = embedding,
+                    start_time    = seg.get("start", 0.0),
+                    end_time      = seg.get("end", 0.0),
+                    chunk_id      = (getattr(item, "chunk_ids", [""])[0]
+                                     if getattr(item, "chunk_ids", None) else ""),
                     section_title = meta.get("section_title", ""),
-                    original_name = meta.get("original_name", ""),
+                    original_name = original_name,
                     page_start    = meta.get("page_span_start", 0),
                     page_end      = meta.get("page_span_end", 0),
-                )
+                ))
 
-                statements.append(stmt)
+            # Fallback: use raw transcript_text when structured_transcripts yielded nothing
+            if not built_any:
+                raw_text = (getattr(item, "transcript_text", "") or "").strip()
+                if raw_text and len(raw_text.split()) >= 5:
+                    text = raw_text[:512]
+                    try:
+                        embedding = self.embedder.text_embedder.embed(text)
+                    except Exception:
+                        embedding = np.zeros(384, dtype=np.float32)
+
+                    statements.append(Statement(
+                        text          = text,
+                        speaker       = "DOCUMENT",
+                        source_type   = source_type,
+                        citation_ref  = cite_ref,
+                        embedding     = embedding,
+                        original_name = original_name,
+                        section_title = meta.get("section_title", ""),
+                        page_start    = meta.get("page_span_start", 0),
+                        page_end      = meta.get("page_span_end", 0),
+                    ))
 
         return statements
 
@@ -432,76 +431,15 @@ Rules:
     # Helpers
     # ─────────────────────────────────────────────────────────────
 
-    def _cosine_similarity(
-        self, a: np.ndarray, b: np.ndarray
-    ) -> float:
-        """Normalised cosine similarity between two vectors."""
-        norm_a = np.linalg.norm(a)
-        norm_b = np.linalg.norm(b)
-        if norm_a == 0 or norm_b == 0:
-            return 0.0
-        return float(np.dot(a, b) / (norm_a * norm_b))
-
-    def _is_pdf_chunk(self, item) -> bool:
-        structured_transcripts = getattr(item, "structured_transcripts", [])
-        if structured_transcripts:
-            speaker = structured_transcripts[0].get(
-                "speaker", ""
-            )
-            if speaker == "DOCUMENT":
-                return True
-        return (
-            item.temporal.primary.start_time == 0.0 and
-            item.temporal.primary.end_time == 0.0
-        )
-
-    def _build_citation_ref(self, item) -> str:
-        if self._is_pdf_chunk(item):
-            meta          = getattr(item, "metadata", {})
-            source_type   = meta.get("source_type", "document")
-            section_title = meta.get("section_title", "")
-            page_start    = meta.get("page_span_start", 0)
-            page_end      = meta.get("page_span_end", 0)
-
-            label = self._source_type_label(source_type)
-            parts = [label]
-            if section_title:
-                parts.append(f"§ {section_title}")
-            if page_start and page_end:
-                p = (
-                    f"p.{page_start}" if page_start == page_end
-                    else f"pp.{page_start}-{page_end}"
-                )
-                parts.append(p)
-            return "[" + " · ".join(parts) + "]"
-        else:
-            s  = item.temporal.primary.start_time
-            e  = item.temporal.primary.end_time
-            sm, ss = int(s) // 60, int(s) % 60
-            em, es = int(e) // 60, int(e) % 60
-            return f"[{sm:02d}:{ss:02d} → {em:02d}:{es:02d}]"
-
-    def _source_type_label(self, source_type: str) -> str:
-        labels = {
-            "fir":               "FIR",
-            "witness_statement": "Witness Statement",
-            "court_order":       "Court Order",
-            "evidence":          "Evidence Report",
-            "charge_sheet":      "Charge Sheet",
-            "document":          "Document",
-            "video":             "Video",
-            "Youtube":           "Video",
-            "Local":             "Video",
-        }
-        return labels.get(
-            source_type,
-            source_type.replace("_", " ").title()
-        )
+    @staticmethod
+    def _fmt_ts(sec: float) -> str:
+        sec = max(0, int(sec))
+        h, rem = divmod(sec, 3600)
+        m, s   = divmod(rem, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
 
     def _parse_verification(self, raw: str) -> Optional[Dict]:
-        """Parse LLM verification response safely."""
         raw = re.sub(r"```json|```", "", raw).strip()
-
         match = re.search(r"\{.*?\}", raw, re.DOTALL)
         if not match:
             return None
@@ -511,7 +449,7 @@ Rules:
         except json.JSONDecodeError:
             return None
 
-        is_contradiction = parsed.get("contradiction_pairs", False)
+        is_contradiction = parsed.get("is_contradiction", False)
         if isinstance(is_contradiction, str):
             is_contradiction = is_contradiction.lower() == "true"
 
@@ -519,55 +457,54 @@ Rules:
         if severity not in ("high", "medium", "low"):
             severity = "low"
 
+        conflict_type = parsed.get("conflict_type", "factual").lower()
+        if conflict_type not in ("location", "time", "identity", "action", "factual"):
+            conflict_type = "factual"
+
+        try:
+            conflict_score = float(parsed.get("conflict_score", 0.5))
+            conflict_score = max(0.0, min(1.0, conflict_score))
+        except (TypeError, ValueError):
+            conflict_score = 0.5
+
         return {
-            "is_contradiction": bool(is_contradiction),
-            "explanation":      str(parsed.get("explanation", "")).strip(),
-            "severity":         severity,
+            "is_contradiction":  bool(is_contradiction),
+            "explanation":       str(parsed.get("explanation", "")).strip(),
+            "severity":          severity,
+            "conflict_score":    conflict_score,
+            "conflict_type":     conflict_type,
+            "legal_significance": str(parsed.get("legal_significance", "")).strip(),
         }
 
+    def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
+        norm_a = np.linalg.norm(a)
+        norm_b = np.linalg.norm(b)
+        if norm_a == 0 or norm_b == 0:
+            return 0.0
+        return float(np.dot(a, b) / (norm_a * norm_b))
+
 
 # ─────────────────────────────────────────────────────────────────
-# Output formatter — for Gradio UI
+# Output formatter
 # ─────────────────────────────────────────────────────────────────
 
-def format_contradiction_report(
-    report: ContradictionReport,
-) -> Dict:
-    """
-    Formats ContradictionReport for Gradio gr.Dataframe display.
-    """
-
+def format_contradiction_report(report: ContradictionReport) -> Dict:
     severity_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}
-
     rows = []
     for c in report.contradictions:
         emoji = severity_emoji.get(c.severity, "⚪")
         cross = "✅" if c.is_cross_source else "—"
-
         rows.append([
             f"{emoji} {c.severity.upper()}",
             c.statement_a.citation_ref,
-            c.statement_a.text[:120] + "..."
-            if len(c.statement_a.text) > 120
-            else c.statement_a.text,
+            c.statement_a.text[:120] + ("..." if len(c.statement_a.text) > 120 else ""),
             c.statement_b.citation_ref,
-            c.statement_b.text[:120] + "..."
-            if len(c.statement_b.text) > 120
-            else c.statement_b.text,
+            c.statement_b.text[:120] + ("..." if len(c.statement_b.text) > 120 else ""),
             c.explanation,
             cross,
         ])
-
     return {
-        "headers": [
-            "Severity",
-            "Citation A",
-            "Statement A",
-            "Citation B",
-            "Statement B",
-            "Explanation",
-            "Cross-Source",
-        ],
+        "headers": ["Severity", "Citation A", "Statement A", "Citation B", "Statement B", "Explanation", "Cross-Source"],
         "rows":    rows,
         "summary": report.summary,
     }

@@ -142,7 +142,8 @@ class LanceDBVectorStore:
                 if visual_norm > 0 and query_norm > 0:
                     visual_vec_norm = visual_vec / visual_norm
                     query_normalized = visual_query_embedding / query_norm
-                    visual_sim = float(np.dot(query_normalized, visual_vec_norm))
+                    vs_arr = np.dot(query_normalized, visual_vec_norm)
+                    visual_sim = float(np.max(vs_arr)) if getattr(vs_arr, "size", 1) > 1 else float(np.asarray(vs_arr).item())
                     visual_sim = max(visual_sim, 0.0)
                     has_visual = True
             if has_visual:
@@ -176,6 +177,32 @@ class LanceDBVectorStore:
                     return False
         return True
     
+    def get_case_stats(self, case_id: str) -> dict:
+        df = self.table.to_pandas()
+        case_df = df[df["case_id"] == case_id]
+        chunk_count = len(case_df)
+
+        doc_keys = set()
+        image_count = 0
+        for _, row in case_df.iterrows():
+            try:
+                data = json.loads(row.get("structured_data") or "{}")
+            except Exception:
+                data = {}
+            name = data.get("original_name") or row.get("original_name", "")
+            src_id = data.get("source_id") or row.get("source_id", "")
+            key = name or src_id
+            if key:
+                doc_keys.add(key)
+            if data.get("has_frames"):
+                image_count += len(data.get("frames", []))
+
+        return {
+            "chunk_count":    chunk_count,
+            "document_count": len(doc_keys),
+            "image_count":    image_count,
+        }
+
     def count_table_rows(self):
         return self.table.count_rows()
     
@@ -184,7 +211,7 @@ class LanceDBVectorStore:
         self._create_table()
     
     def get(self,chunk_ids):
-        self.table.search().where(
+        return self.table.search().where(
             f"chunk_id in {chunk_ids}"
         ).to_list()
             

@@ -256,13 +256,15 @@ class Retriever:
 
             # Compute text similarity
             if text_emb is not None:
-                text_sim = float(np.dot(query_text_emb, text_emb))
+                ts_arr = np.dot(query_text_emb, text_emb)
+                text_sim = float(np.max(ts_arr)) if getattr(ts_arr, "size", 1) > 1 else float(np.asarray(ts_arr).item())
             else:
                 text_sim = 0.0
 
             # Compute visual similarity (if available)
             if query_vis_emb is not None and vis_emb is not None:
-                vis_sim = float(np.dot(query_vis_emb, vis_emb))
+                vs_arr = np.dot(query_vis_emb, vis_emb)
+                vis_sim = float(np.max(vs_arr)) if getattr(vs_arr, "size", 1) > 1 else float(np.asarray(vs_arr).item())
             else:
                 vis_sim = 0.0
 
@@ -297,7 +299,8 @@ class Retriever:
                 redundancy = 0.0
                 for j in selected_indices:
                     if candidate_text_embs[i] is not None and candidate_text_embs[j] is not None:
-                        sim = float(np.dot(candidate_text_embs[i], candidate_text_embs[j]))
+                        sim_arr = np.dot(np.squeeze(candidate_text_embs[i]), np.squeeze(candidate_text_embs[j]))
+                        sim = float(np.max(sim_arr)) if isinstance(sim_arr, np.ndarray) and sim_arr.size > 1 else float(np.asarray(sim_arr).item())
                         redundancy = max(redundancy, sim)
 
                 mmr_score = self.mmr_lambda * relevance - (1 - self.mmr_lambda) * redundancy
@@ -313,8 +316,6 @@ class Retriever:
 
         if not candidates:
             return []
-
-        candidates = candidates[:20]
 
         reranker_scores = self.reranker.score_batch(query, candidates)
 
@@ -335,7 +336,7 @@ class Retriever:
             reverse=True
         )
 
-        return candidates
+        return candidates[:20]
             
     
     def _adaptive_alpha(self,querytype_dict):
@@ -364,6 +365,8 @@ class Retriever:
         
         expanded = []
         for item in candidates:
+            if item.get('start_time', 0) == 0.0 and item.get('end_time', 0) == 0.0:
+                continue
             expanded_start = max(0,item['start_time']-window)
             expanded_end = item['end_time'] + window
             
@@ -414,14 +417,11 @@ class Retriever:
         else:
             gap = top_score
 
-        coverage = min(1.0, len(sorted_candidates) / 5.0)
+        coverage = min(1.0, len(sorted_candidates) / 10.0)
         normalized_score = max(0.0, min(1.0, top_score))
 
-        confidence = (
-            0.5 * normalized_score +
-            0.3 * min(1.0, gap * 2) +
-            0.2 * coverage
-        )
+        # Dynamic confidence that scales realistically (0.3 to 0.85 base)
+        confidence = 0.3 + (normalized_score * 0.5) + (coverage * 0.05)
 
         return max(0.0, min(1.0, confidence))
     

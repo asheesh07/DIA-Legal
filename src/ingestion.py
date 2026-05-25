@@ -1,18 +1,10 @@
-from typing import Dict
+from typing import Dict, Callable, Optional
 from src.reader import PDFAsset
 from src.chunker import PDFChunker
+import numpy as np
 
 
 class IngestionPipeline:
-    """
-    Full ingestion pipeline for DIA-Legal.
-
-    Supports:
-    - Video (YouTube + Local): Read → Process → Chunk → Embed → Store
-    - PDF documents:           Read → Chunk → Embed → Store
-                               (no video processor needed)
-    """
-
     def __init__(
         self,
         reader_router,
@@ -34,9 +26,13 @@ class IngestionPipeline:
     # ============================================================
 
     def ingest(self, source: str, case_id: str,
-               storage_path: str) -> Dict:
+               storage_path: str,
+               progress: Optional[Callable[[str], None]] = None) -> Dict:
 
-        # 1. Route to correct reader
+        def emit(stage: str):
+            if progress:
+                progress(stage)
+
         reader = self.reader_router.from_path(source)
         reader.validate(source)
 
@@ -46,61 +42,66 @@ class IngestionPipeline:
             output_path=storage_path
         )
 
-        # 2. Branch: PDF vs Video
         if isinstance(asset, PDFAsset):
-            return self._ingest_pdf(asset, case_id)
+            return self._ingest_pdf(asset, case_id, emit)
         else:
-            return self._ingest_video(asset, case_id)
+            return self._ingest_video(asset, case_id, emit)
 
     # ============================================================
     # PDF Path
     # ============================================================
 
-    def _ingest_pdf(self, asset: PDFAsset, case_id: str) -> Dict:
-
-        # Chunk sections into LanceDB-ready dicts
+    def _ingest_pdf(self, asset: PDFAsset, case_id: str, emit) -> Dict:
+        emit("reading")
         chunks = self.pdf_chunker.chunk(asset)
 
-        indexed_count = 0
+        if not chunks:
+            return {
+                "status": "success", "case_id": case_id, "source": "pdf",
+                "doc_type": asset.source_type, "original_name": asset.original_name,
+                "sections": len(asset.sections), "chunks_indexed": 0,
+            }
 
-        for chunk in chunks:
+        emit("chunking")
+        texts = [chunk.get("text", "") for chunk in chunks]
 
-            embeddings = self.embedder.embed_chunk(chunk)
+        emit("embedding")
+        text_embeddings = self.embedder.text_embedder.embed_batch(texts)
 
-            record = {
-                # ── Core fields ────────────────────────────────
+        visual_dim = (
+            self.embedder.visual_embedder.embed_dim
+            if self.embedder.visual_embedder else 512
+        )
+        zero_visual = [0.0] * visual_dim
+
+        records = []
+        for i, chunk in enumerate(chunks):
+            records.append({
                 "chunk_id":    chunk["chunk_id"],
                 "case_id":     case_id,
                 "start_time":  0.0,
                 "end_time":    0.0,
 
-                # ── Embeddings ─────────────────────────────────
-                "text_embedding":   embeddings["text_embedding"],
-                "visual_embedding": embeddings.get(
-                    "visual_embedding"
-                ),
+                "text_embedding":   text_embeddings[i].tolist(),
+                "visual_embedding": zero_visual,
 
-                # ── Transcript (mirrors video structure) ───────
-                "transcript_segments": chunk.get(
-                    "transcript_segments", []
-                ),
+                "transcript_segments": chunk.get("transcript_segments", []),
                 "frames":          [],
                 "transcript_text": chunk.get("text", ""),
                 "speakers":        ["DOCUMENT"],
                 "has_ocr":         False,
                 "has_frames":      False,
 
-                # ── PDF provenance ─────────────────────────────
                 "source_id":     chunk.get("source_id", ""),
                 "source_type":   chunk.get("source_type", "document"),
                 "original_name": chunk.get("original_name", ""),
                 "section_title": chunk.get("section_title", ""),
                 "section_type":  chunk.get("section_type", ""),
                 "page_span":     chunk.get("page_span", {}),
-            }
+            })
 
-            self.vector_store.upsert([record])
-            indexed_count += 1
+        emit("indexing")
+        self.vector_store.upsert(records)
 
         return {
             "status":         "success",
@@ -109,53 +110,73 @@ class IngestionPipeline:
             "doc_type":       asset.source_type,
             "original_name":  asset.original_name,
             "sections":       len(asset.sections),
-            "chunks_indexed": indexed_count,
+            "chunks_indexed": len(records),
         }
 
     # ============================================================
-    # Video Path — unchanged from your original
+    # Video Path
     # ============================================================
 
-    def _ingest_video(self, asset, case_id: str) -> Dict:
+    def _ingest_video(self, asset, case_id: str, emit) -> Dict:
+        processed_segments = self.video_processor.process(asset, progress=emit)
 
-        # Process video (ASR + Frames + OCR)
-        processed_segments = self.video_processor.process(asset)
-
-        # Chunk
+        emit("chunking")
         chunks = self.chunker.chunk(processed_segments)
 
-        indexed_count = 0
+        if not chunks:
+            return {"status": "success", "case_id": case_id, "source": "video", "chunks_indexed": 0}
 
+        # Batch all text embeddings in one model call
+        emit("embedding")
+        texts = [self.embedder._build_text_blob(chunk) for chunk in chunks]
+        text_embeddings = self.embedder.text_embedder.embed_batch(texts)
+
+        # Visual embeddings per chunk (each chunk's frames are already small)
+        visual_dim = (
+            self.embedder.visual_embedder.embed_dim
+            if self.embedder.visual_embedder else 512
+        )
+
+        records = []
         self.vector_store.clear()
 
-        for chunk in chunks:
+        for i, chunk in enumerate(chunks):
+            text_emb = text_embeddings[i].tolist()
 
-            embeddings = self.embedder.embed_chunk(chunk)
-            transcript_text = self._flatten_transcript(chunk)
-            speakers = self._extract_speakers(chunk)
+            visual_emb = None
+            if self.embedder.visual_embedder and chunk.get("frames"):
+                frame_paths = [
+                    f["image_path"] for f in chunk["frames"] if f.get("image_path")
+                ]
+                if frame_paths:
+                    vecs = self.embedder.visual_embedder.embed_batch(frame_paths)
+                    agg = self.embedder.visual_embedder.aggregate(vecs)
+                    visual_emb = agg.tolist()
+            if visual_emb is None:
+                visual_emb = [0.0] * visual_dim
 
-            has_ocr = any(
-                frame.get("ocr_text")
-                for frame in chunk.get("frames", [])
+            transcript_text = " ".join(
+                f"[{seg.get('speaker','?')}] {seg.get('text','')}"
+                for seg in chunk.get("transcript_segments", [])
             )
-            has_frames = len(chunk.get("frames", [])) > 0
+            speakers = list({
+                seg.get("speaker") for seg in chunk.get("transcript_segments", [])
+                if seg.get("speaker")
+            })
 
-            record = {
+            has_ocr    = any(f.get("ocr_text") for f in chunk.get("frames", []))
+            has_frames = bool(chunk.get("frames"))
+
+            records.append({
                 "chunk_id":   chunk["chunk_id"],
                 "case_id":    case_id,
                 "start_time": float(chunk["time_range"]["start"]),
                 "end_time":   float(chunk["time_range"]["end"]),
 
-                "text_embedding":   embeddings["text_embedding"],
-                "visual_embedding": (
-                    embeddings["visual_embedding"]
-                    if embeddings["visual_embedding"] is not None
-                    else None
-                ),
+                "text_embedding":   text_emb,
+                "visual_embedding": visual_emb,
 
-                "transcript_segments": chunk.get(
-                    "transcript_segments", []
-                ),
+                "transcript_segments": chunk.get("transcript_segments", []),
                 "frames":          chunk.get("frames", []),
                 "transcript_text": transcript_text,
                 "speakers":        speakers,
@@ -163,39 +184,133 @@ class IngestionPipeline:
                 "has_frames":      has_frames,
                 "source_type":     asset.source_type,
 
-                # PDF fields empty for video chunks
                 "source_id":     "",
                 "original_name": "",
                 "section_title": "",
                 "section_type":  "",
                 "page_span":     {},
-            }
+            })
 
-            self.vector_store.upsert([record])
-            indexed_count += 1
+        emit("indexing")
+        self.vector_store.upsert(records)
 
         return {
             "status":         "success",
             "case_id":        case_id,
             "source":         "video",
-            "chunks_indexed": indexed_count,
+            "chunks_indexed": len(records),
         }
 
     # ============================================================
-    # Utilities
+    # Video path from pre-extracted files (streaming upload)
     # ============================================================
 
-    def _flatten_transcript(self, chunk) -> str:
-        texts = []
-        for seg in chunk.get("transcript_segments", []):
-            speaker = seg.get("speaker", "UNKNOWN")
-            text    = seg.get("text", "")
-            texts.append(f"[{speaker}] {text}")
-        return " ".join(texts)
+    def ingest_from_files(self, audio_path: str, frames_dir,
+                          case_id: str, evidence_id: str,
+                          source_type: str = "Local",
+                          progress: Optional[Callable[[str], None]] = None) -> Dict:
+        """
+        Used when the route has already run FFmpeg (streaming upload).
+        Skips the reader/FFmpeg step and goes straight to ML.
+        """
+        def emit(stage: str):
+            if progress:
+                progress(stage)
 
-    def _extract_speakers(self, chunk):
-        speakers = set()
-        for seg in chunk.get("transcript_segments", []):
-            if seg.get("speaker"):
-                speakers.add(seg["speaker"])
-        return list(speakers)
+        processed_segments = self.video_processor.process_from_files(
+            audio_path=audio_path,
+            frames_dir=frames_dir,
+            case_id=case_id,
+            evidence_id=evidence_id,
+            progress=emit,
+        )
+
+        from src.reader import VideoAsset
+        from datetime import datetime
+        from pathlib import Path
+
+        fake_asset = VideoAsset(
+            evidence_id=evidence_id,
+            case_id=case_id,
+            source_type=source_type,
+            original_name="uploaded_video",
+            stored_path=audio_path,
+            created_at=datetime.utcnow(),
+            status="streamed",
+        )
+
+        emit("chunking")
+        chunks = self.chunker.chunk(processed_segments)
+
+        if not chunks:
+            return {"status": "success", "case_id": case_id, "source": "video", "chunks_indexed": 0}
+
+        emit("embedding")
+        texts = [self.embedder._build_text_blob(chunk) for chunk in chunks]
+        text_embeddings = self.embedder.text_embedder.embed_batch(texts)
+
+        visual_dim = (
+            self.embedder.visual_embedder.embed_dim
+            if self.embedder.visual_embedder else 512
+        )
+
+        records = []
+        self.vector_store.clear()
+
+        for i, chunk in enumerate(chunks):
+            text_emb = text_embeddings[i].tolist()
+
+            visual_emb = None
+            if self.embedder.visual_embedder and chunk.get("frames"):
+                frame_paths = [
+                    f["image_path"] for f in chunk["frames"] if f.get("image_path")
+                ]
+                if frame_paths:
+                    vecs = self.embedder.visual_embedder.embed_batch(frame_paths)
+                    agg = self.embedder.visual_embedder.aggregate(vecs)
+                    visual_emb = agg.tolist()
+            if visual_emb is None:
+                visual_emb = [0.0] * visual_dim
+
+            transcript_text = " ".join(
+                f"[{seg.get('speaker','?')}] {seg.get('text','')}"
+                for seg in chunk.get("transcript_segments", [])
+            )
+            speakers = list({
+                seg.get("speaker") for seg in chunk.get("transcript_segments", [])
+                if seg.get("speaker")
+            })
+
+            records.append({
+                "chunk_id":   chunk["chunk_id"],
+                "case_id":    case_id,
+                "start_time": float(chunk["time_range"]["start"]),
+                "end_time":   float(chunk["time_range"]["end"]),
+
+                "text_embedding":   text_emb,
+                "visual_embedding": visual_emb,
+
+                "transcript_segments": chunk.get("transcript_segments", []),
+                "frames":          chunk.get("frames", []),
+                "transcript_text": transcript_text,
+                "speakers":        speakers,
+                "has_ocr":         any(f.get("ocr_text") for f in chunk.get("frames", [])),
+                "has_frames":      bool(chunk.get("frames")),
+                "source_type":     source_type,
+
+                "source_id":     "",
+                "original_name": "",
+                "section_title": "",
+                "section_type":  "",
+                "page_span":     {},
+            })
+
+        emit("indexing")
+        self.vector_store.upsert(records)
+
+        return {
+            "status":         "success",
+            "case_id":        case_id,
+            "source":         "video",
+            "chunks_indexed": len(records),
+        }
