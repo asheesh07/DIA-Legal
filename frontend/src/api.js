@@ -42,7 +42,12 @@ async function _streamIngest(path, bodyOrFormData, onEvent, isForm = false) {
   const headers = isForm ? {} : { 'Content-Type': 'application/json' };
   const body    = isForm ? bodyOrFormData : JSON.stringify(bodyOrFormData);
 
-  const res = await fetch(`${sseBase}${path}`, { method: 'POST', headers, body });
+  let res;
+  try {
+    res = await fetch(`${sseBase}${path}`, { method: 'POST', headers, body });
+  } catch (networkErr) {
+    throw new Error('Cannot reach server — make sure the backend is running and VITE_API_URL is set correctly.');
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
     throw new Error(text || `HTTP ${res.status}`);
