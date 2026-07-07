@@ -68,7 +68,11 @@ async def add_process_time_header(request: Request, call_next):
 def get_systems():
     if not _systems:
         print("[DIA-Legal] Loading ML systems...", flush=True)
-        _systems.update(_build_systems())
+        try:
+            _systems.update(_build_systems())
+        except Exception as exc:
+            print(f"[DIA-Legal] STARTUP ERROR: {exc}", flush=True)
+            raise HTTPException(status_code=503, detail=str(exc))
         print("[DIA-Legal] ML systems ready.", flush=True)
     return _systems
 
