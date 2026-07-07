@@ -374,7 +374,11 @@ export default function BriefMode({ caseId }) {
   const briefContradictions = (brief?.contradictions || []).map(c => ({
     severity:          (c.severity || '').toLowerCase(),
     speaker_a:         c.speaker_a,
+    timestamp_a:       c.timestamp_a,
+    source_name_a:     c.source_name_a,
     speaker_b:         c.speaker_b,
+    timestamp_b:       c.timestamp_b,
+    source_name_b:     c.source_name_b,
     claim:             c.statement_a,
     claim_citation:    { ref: c.citation_a, type: 'transcript' },
     evidence:          c.statement_b,

@@ -242,15 +242,25 @@ class TrialBriefGenerator:
             }
             for e in evidence_map.opposing[:5]
         ]
+        def _fmt_ts(sec: float) -> str:
+            sec = max(0, int(sec))
+            h, rem = divmod(sec, 3600)
+            m, s = divmod(rem, 60)
+            return f"{h:02d}:{m:02d}:{s:02d}"
+
         contradictions_fmt = [
             {
                 "severity":        c.severity,
                 "speaker_a":       c.statement_a.speaker,
                 "citation_a":      c.statement_a.citation_ref,
                 "statement_a":     c.statement_a.text[:200],
+                "timestamp_a":     _fmt_ts(c.statement_a.start_time) if c.statement_a.start_time > 0 else "",
+                "source_name_a":   c.statement_a.original_name,
                 "speaker_b":       c.statement_b.speaker,
                 "citation_b":      c.statement_b.citation_ref,
                 "statement_b":     c.statement_b.text[:200],
+                "timestamp_b":     _fmt_ts(c.statement_b.start_time) if c.statement_b.start_time > 0 else "",
+                "source_name_b":   c.statement_b.original_name,
                 "explanation":     c.explanation,
                 "conflict_score":  getattr(c, "conflict_score", 0.5),
                 "is_cross_source": c.is_cross_source,

@@ -171,19 +171,36 @@ class ContradictionDetector:
             print(f"[ContradictionDetector] Only {len(statements)} statement(s) — need ≥ 2.", flush=True)
             return report
 
-        # Stage 1: generate all pairs up to 200
-        all_pairs: List[Tuple[Statement, Statement, bool]] = []
+        # Stage 1: two-pool pair generation — cross-source pairs get a guaranteed quota
+        # Naive iteration fills the budget with same-source (video↔video) pairs before
+        # any video↔PDF pair is ever considered; the two-pool approach prevents that.
+        BUDGET      = 200
+        CROSS_QUOTA = BUDGET // 2  # at least 100 slots reserved for cross-source
+
+        cross_pairs: List[Tuple[Statement, Statement, bool]] = []
+        same_pairs:  List[Tuple[Statement, Statement, bool]] = []
+
         for i in range(len(statements)):
+            if len(cross_pairs) >= CROSS_QUOTA and len(same_pairs) >= BUDGET:
+                break
             for j in range(i + 1, len(statements)):
-                if len(all_pairs) >= 200:
-                    break
                 same_doc = (
                     statements[i].original_name == statements[j].original_name
                     and statements[i].original_name != ""
                 )
-                all_pairs.append((statements[i], statements[j], not same_doc))
-            if len(all_pairs) >= 200:
-                break
+                if not same_doc:
+                    if len(cross_pairs) < CROSS_QUOTA:
+                        cross_pairs.append((statements[i], statements[j], True))
+                else:
+                    if len(same_pairs) < BUDGET:
+                        same_pairs.append((statements[i], statements[j], False))
+                if len(cross_pairs) >= CROSS_QUOTA and len(same_pairs) >= BUDGET:
+                    break
+
+        # Any unused cross-source quota overflows to same-source
+        cross_take = min(len(cross_pairs), CROSS_QUOTA)
+        same_take  = min(len(same_pairs),  BUDGET - cross_take)
+        all_pairs  = cross_pairs[:cross_take] + same_pairs[:same_take]
 
         # Stage 2: keyword conflict filter
         suspicious_pairs = [
@@ -195,7 +212,8 @@ class ContradictionDetector:
         report.total_pairs_flagged = len(suspicious_pairs)
         print(
             f"[ContradictionDetector] {len(statements)} statements → "
-            f"{len(all_pairs)} pairs → {len(suspicious_pairs)} passed keyword filter",
+            f"{len(all_pairs)} pairs ({cross_take} cross-source, {same_take} same-source) → "
+            f"{len(suspicious_pairs)} passed keyword filter",
             flush=True,
         )
 
@@ -311,8 +329,8 @@ class ContradictionDetector:
     def _build_verification_prompt(self, stmt_a: Statement, stmt_b: Statement) -> str:
         exhibit_a = stmt_a.citation_ref or stmt_a.original_name or stmt_a.source_type
         exhibit_b = stmt_b.citation_ref or stmt_b.original_name or stmt_b.source_type
-        ts_a = self._fmt_ts(stmt_a.start_time) if stmt_a.start_time else "document"
-        ts_b = self._fmt_ts(stmt_b.start_time) if stmt_b.start_time else "document"
+        ts_a = self._fmt_ts(stmt_a.start_time) if stmt_a.start_time else (f"p.{stmt_a.page_start}" if stmt_a.page_start > 0 else "document")
+        ts_b = self._fmt_ts(stmt_b.start_time) if stmt_b.start_time else (f"p.{stmt_b.page_start}" if stmt_b.page_start > 0 else "document")
 
         return f"""You are a precise legal contradiction detector. Determine whether these two case statements assert mutually exclusive facts.
 
