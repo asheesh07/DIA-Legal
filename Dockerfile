@@ -39,6 +39,12 @@ RUN cd frontend && npm ci
 COPY --chown=user . .
 RUN cd frontend && npm run build
 
+# data/ is gitignored so COPY never creates it.
+# Pre-create it as root then hand ownership to the app user
+# so runtime mkdir/write calls succeed.
+RUN mkdir -p /app/data/tmp /app/data/cases /app/data/lancedb \
+    && chown -R user:user /app/data
+
 USER user
 
 CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
