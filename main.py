@@ -103,7 +103,7 @@ def _build_systems():
     chunker         = Chunker(max_duration=20, max_tokens=512, overlap_duration=5)
     pdf_chunker     = PDFChunker(max_tokens=512, overlap_tokens=50)
 
-    text_embedder   = TextEmbedder(model_name="all-MiniLM-L6-v2", batch_size=12, normalize=True)
+    text_embedder   = TextEmbedder(model_name="all-MiniLM-L6-v2", batch_size=32, normalize=True)
     visual_embedder = VisualEmbedder(model_name="openai/clip-vit-base-patch32", device="cpu", normalize=True)
     embedder        = MultiModalEmbedder(text_embedder=text_embedder, visual_embedder=visual_embedder)
 

@@ -113,12 +113,14 @@ class VideoProcessor:
             if progress:
                 progress(stage)
 
-        frames_metadata = self._collect_frames(frames_dir, interval_sec=30)
+        frames_metadata = self._collect_frames(frames_dir, interval_sec=60)
 
         emit("transcribing")
-        transcript = self.audio_to_text(audio_path)
-        emit("diarizing")
-        analysed = self.analyse_frames(frames_metadata)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            transcript_fut = pool.submit(self.audio_to_text, audio_path)
+            frames_fut     = pool.submit(self.analyse_frames, frames_metadata)
+            transcript = transcript_fut.result()
+            analysed   = frames_fut.result()
         emit("chunking")
         return self.aligned_modalities(analysed, transcript, case_id)
 
@@ -144,7 +146,7 @@ class VideoProcessor:
 
     # ── Frames ────────────────────────────────────────────────────
 
-    def video_to_images(self, asset, interval_sec: int = 30):
+    def video_to_images(self, asset, interval_sec: int = 60):
         path = str(asset.stored_path)
         frames_dir = (
             self.base_output_path / asset.case_id / "frames" / asset.evidence_id
@@ -233,14 +235,21 @@ class VideoProcessor:
         result = self.model.transcribe(audio_path)
         language = result.get("language", "en")
 
-        model_a, metadata = whisperx.load_align_model(
-            language_code=language, device=self.device
-        )
-        result = whisperx.align(
-            result["segments"], model_a, metadata, audio_path, self.device
-        )
-        diarize_segments = self.diarize_model(audio_path)
-        result = whisperx.assign_word_speakers(diarize_segments, result)
+        try:
+            model_a, metadata = whisperx.load_align_model(
+                language_code=language, device=self.device
+            )
+            result = whisperx.align(
+                result["segments"], model_a, metadata, audio_path, self.device
+            )
+        except Exception as exc:
+            print(f"[VideoProcessor] Alignment skipped: {exc}", flush=True)
+
+        try:
+            diarize_segments = self.diarize_model(audio_path)
+            result = whisperx.assign_word_speakers(diarize_segments, result)
+        except Exception as exc:
+            print(f"[VideoProcessor] Diarization skipped: {exc}", flush=True)
 
         raw = [
             {
@@ -267,23 +276,11 @@ class VideoProcessor:
     # ── Frame analysis ────────────────────────────────────────────
 
     def analyse_frames(self, frames_metadata):
-        images = []
+        # BLIP captioning is skipped on CPU — 600 MB model at ~3s/frame is
+        # the dominant per-frame cost and adds little over OCR for legal docs.
         for f in frames_metadata:
-            images.append(Image.open(f["image_path"]).convert("RGB"))
+            f["caption"]  = ""
             f["ocr_text"] = self._ocr(f["image_path"])
-            f["caption"] = ""
-
-        if images:
-            batch_size = 16
-            for i in range(0, len(images), batch_size):
-                batch = images[i : i + batch_size]
-                inputs = self.processor(images=batch, return_tensors="pt").to(self.device)
-                with torch.no_grad():
-                    out = self.caption_model.generate(**inputs)
-                captions = self.processor.batch_decode(out, skip_special_tokens=True)
-                for j, cap in enumerate(captions):
-                    frames_metadata[i + j]["caption"] = cap
-
         return frames_metadata
 
     def _ocr(self, path):
