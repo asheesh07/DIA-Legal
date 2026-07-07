@@ -39,6 +39,12 @@ RUN cd frontend && npm ci
 COPY --chown=user . .
 RUN cd frontend && npm run build
 
+# Pre-download the two models used on every first request so there is
+# no cold-start download that would stall the SSE stream and trip the
+# proxy's idle-connection timeout.
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+RUN python -c "from sentence_transformers import CrossEncoder; CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')"
+
 # data/ is gitignored so COPY never creates it.
 # Pre-create it as root then hand ownership to the app user
 # so runtime mkdir/write calls succeed.

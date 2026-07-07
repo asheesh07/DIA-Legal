@@ -429,6 +429,8 @@ def _make_sse_generator(work_fn, loop, timeout: int = 900):
     back as SSE.  work_fn receives a single argument: a thread-safe emit()
     callable that puts dicts onto an asyncio.Queue.
     """
+    _KEEPALIVE_INTERVAL = 15  # seconds between keepalive pings
+
     q: asyncio.Queue = asyncio.Queue()
 
     def emit(event: dict):
@@ -438,15 +440,21 @@ def _make_sse_generator(work_fn, loop, timeout: int = 900):
     loop.run_in_executor(executor, work_fn, emit)
 
     async def gen():
+        elapsed = 0
         while True:
             try:
-                event = await asyncio.wait_for(q.get(), timeout=timeout)
+                event = await asyncio.wait_for(q.get(), timeout=_KEEPALIVE_INTERVAL)
                 yield _sse(event)
                 if event.get("stage") in ("done", "error", "cached"):
                     break
             except asyncio.TimeoutError:
-                yield _sse({"stage": "error", "error": "Processing timed out"})
-                break
+                elapsed += _KEEPALIVE_INTERVAL
+                if elapsed >= timeout:
+                    yield _sse({"stage": "error", "error": "Processing timed out"})
+                    break
+                # SSE comment — proxies see data and keep the connection alive;
+                # browsers ignore comment lines so the UI state is unchanged.
+                yield ": keepalive\n\n"
 
     return gen()
 
