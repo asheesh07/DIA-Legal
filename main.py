@@ -901,10 +901,27 @@ def download_brief(brief_id: str):
 
 # ════════════════════════════════════════════════════════════════
 # ROUTES — STATIC FILES
+# Mounting StaticFiles at "/" breaks ASGI lifespan in some Starlette
+# versions. Use an explicit assets mount + catch-all GET instead.
 # ════════════════════════════════════════════════════════════════
 frontend_path = Path("frontend/dist")
 if frontend_path.exists():
-    app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="frontend")
+    assets_path = frontend_path / "assets"
+    if assets_path.exists():
+        app.mount("/assets", StaticFiles(directory=str(assets_path)), name="assets")
+
+    @app.get("/", include_in_schema=False)
+    async def serve_index():
+        from fastapi.responses import FileResponse
+        return FileResponse(str(frontend_path / "index.html"))
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str):
+        from fastapi.responses import FileResponse
+        file = frontend_path / full_path
+        if file.is_file():
+            return FileResponse(str(file))
+        return FileResponse(str(frontend_path / "index.html"))
 else:
     print(f"Warning: Frontend build directory '{frontend_path}' not found. UI will not be available.", flush=True)
 
