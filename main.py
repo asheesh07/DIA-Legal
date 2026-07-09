@@ -35,6 +35,11 @@ DB_PATH      = "data/lancedb"
 CACHE_FILE   = "data/ingestion_cache.json"
 CASES_FILE   = "data/cases_registry.json"
 
+# ── Ingest limits ─────────────────────────────────────────────────
+PDF_MAX_FILES       = 5
+PDF_MAX_BYTES       = 12  * 1024 * 1024   # 12 MB
+VIDEO_MAX_BYTES     = 250 * 1024 * 1024   # 250 MB
+
 # ── Global system instances ───────────────────────────────────────
 _systems = {}
 
@@ -344,13 +349,16 @@ def ingest_youtube(body: YouTubeIngestRequest):
 @app.post("/api/ingest/video")
 async def ingest_video(case_id: str = Form(...), file: UploadFile = File(...)):
     case_id = case_id.strip()
+    content = await file.read()
+    if len(content) > VIDEO_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f'"{file.filename}" is {len(content) // (1024*1024)} MB — video files must be 250 MB or smaller'
+        )
     tmp_dir = Path(BASE_STORAGE) / "tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     tmp_path = tmp_dir / file.filename
-
-    with open(tmp_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-
+    tmp_path.write_bytes(content)
     cache = _load_cache()
     key   = _cache_key(str(tmp_path), case_id)
 
@@ -506,6 +514,11 @@ async def ingest_video_stream(case_id: str = Form(...), file: UploadFile = File(
     Progress is delivered as SSE.
     """
     case_id    = case_id.strip()
+    if file.size and file.size > VIDEO_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f'"{file.filename}" is {file.size // (1024*1024)} MB — video files must be 250 MB or smaller'
+        )
     evidence_id = str(_uuid.uuid4())
 
     base       = Path(BASE_STORAGE)
@@ -601,6 +614,13 @@ async def ingest_video_stream(case_id: str = Form(...), file: UploadFile = File(
 @app.post("/api/ingest/pdf/stream")
 async def ingest_pdf_stream(case_id: str = Form(...), files: List[UploadFile] = File(...)):
     case_id = case_id.strip()
+
+    if len(files) > PDF_MAX_FILES:
+        raise HTTPException(
+            status_code=413,
+            detail=f'You sent {len(files)} PDFs — the limit is {PDF_MAX_FILES} files per ingest'
+        )
+
     tmp_dir = Path(BASE_STORAGE) / "tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -608,9 +628,14 @@ async def ingest_pdf_stream(case_id: str = Form(...), files: List[UploadFile] = 
     saved: List[dict] = []
     cache = _load_cache()
     for f in files:
+        content = await f.read()
+        if len(content) > PDF_MAX_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f'"{f.filename}" is {len(content) // (1024*1024)} MB — PDF files must be 12 MB or smaller'
+            )
         key = _cache_key(f.filename, case_id)
         tmp_path = tmp_dir / f.filename
-        content = await f.read()
         tmp_path.write_bytes(content)
         saved.append({"file": f, "tmp_path": tmp_path, "key": key})
 

@@ -13,6 +13,20 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
+// ── Limits ───────────────────────────────────────────────────────
+const PDF_MAX_FILES   = 5;
+const PDF_MAX_MB      = 12;
+const VIDEO_MAX_FILES = 2;
+const VIDEO_MAX_MB    = 250;
+
+const PDF_MAX_BYTES   = PDF_MAX_MB   * 1024 * 1024;
+const VIDEO_MAX_BYTES = VIDEO_MAX_MB * 1024 * 1024;
+
+function fmtSize(bytes) {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / 1024).toFixed(0)} KB`;
+}
+
 // ── Stage metadata ────────────────────────────────────────────────
 const STAGE_LABEL = {
   uploading:        'Uploading…',
@@ -273,10 +287,33 @@ export function IngestDialog({ isOpen, onOpenChange, activeCaseId, onIngested })
 
           {/* ── Video files ──────────────────────────────────────── */}
           <div className="space-y-2">
-            <SectionHeader icon={Video} iconClass="text-blue-500" title="Video Files" />
+            <SectionHeader icon={Video} iconClass="text-blue-500"
+              title={`Video Files (${videoFiles.length}/${VIDEO_MAX_FILES} · max ${VIDEO_MAX_MB} MB each)`} />
             <input ref={videoRef} type="file" accept=".mp4,.mov,.mkv,.avi,.webm"
               multiple className="hidden" disabled={isRunning}
-              onChange={e => setVideoFiles(prev => [...prev, ...Array.from(e.target.files)])}
+              onChange={e => {
+                const picked = Array.from(e.target.files);
+                e.target.value = '';
+                setVideoFiles(prev => {
+                  const tooBig = picked.filter(f => f.size > VIDEO_MAX_BYTES);
+                  const ok     = picked.filter(f => f.size <= VIDEO_MAX_BYTES);
+                  tooBig.forEach(f =>
+                    toast.error(
+                      `"${f.name}" is ${fmtSize(f.size)} — video files must be ${VIDEO_MAX_MB} MB or smaller`
+                    )
+                  );
+                  const combined = [...prev, ...ok];
+                  if (combined.length > VIDEO_MAX_FILES) {
+                    const removed = combined.length - VIDEO_MAX_FILES;
+                    toast.error(
+                      `You added ${combined.length} video${combined.length !== 1 ? 's' : ''} — the limit is ${VIDEO_MAX_FILES}. ` +
+                      `${removed} file${removed !== 1 ? 's were' : ' was'} removed.`
+                    );
+                    return combined.slice(0, VIDEO_MAX_FILES);
+                  }
+                  return combined;
+                });
+              }}
             />
             {videoFiles.length > 0 && (
               <div className="border rounded-md px-3 divide-y divide-border">
@@ -310,9 +347,10 @@ export function IngestDialog({ isOpen, onOpenChange, activeCaseId, onIngested })
               </div>
             )}
             <Button variant="outline" size="sm" className="w-full"
-              onClick={() => videoRef.current?.click()} disabled={isRunning}>
+              onClick={() => videoRef.current?.click()}
+              disabled={isRunning || videoFiles.length >= VIDEO_MAX_FILES}>
               <Upload className="w-3.5 h-3.5 mr-2" />
-              Choose video files…
+              {videoFiles.length >= VIDEO_MAX_FILES ? `Limit reached (${VIDEO_MAX_FILES}/${VIDEO_MAX_FILES})` : 'Choose video files…'}
             </Button>
           </div>
 
@@ -320,10 +358,33 @@ export function IngestDialog({ isOpen, onOpenChange, activeCaseId, onIngested })
 
           {/* ── PDF files ────────────────────────────────────────── */}
           <div className="space-y-2">
-            <SectionHeader icon={FileText} iconClass="text-orange-500" title="PDF Documents" />
+            <SectionHeader icon={FileText} iconClass="text-orange-500"
+              title={`PDF Documents (${pdfFiles.length}/${PDF_MAX_FILES} · max ${PDF_MAX_MB} MB each)`} />
             <input ref={pdfRef} type="file" accept=".pdf" multiple className="hidden"
               disabled={isRunning}
-              onChange={e => setPdfFiles(prev => [...prev, ...Array.from(e.target.files)])}
+              onChange={e => {
+                const picked = Array.from(e.target.files);
+                e.target.value = '';
+                setPdfFiles(prev => {
+                  const tooBig = picked.filter(f => f.size > PDF_MAX_BYTES);
+                  const ok     = picked.filter(f => f.size <= PDF_MAX_BYTES);
+                  tooBig.forEach(f =>
+                    toast.error(
+                      `"${f.name}" is ${fmtSize(f.size)} — PDF files must be ${PDF_MAX_MB} MB or smaller`
+                    )
+                  );
+                  const combined = [...prev, ...ok];
+                  if (combined.length > PDF_MAX_FILES) {
+                    const removed = combined.length - PDF_MAX_FILES;
+                    toast.error(
+                      `You added ${combined.length} PDF${combined.length !== 1 ? 's' : ''} — the limit is ${PDF_MAX_FILES}. ` +
+                      `${removed} file${removed !== 1 ? 's were' : ' was'} removed.`
+                    );
+                    return combined.slice(0, PDF_MAX_FILES);
+                  }
+                  return combined;
+                });
+              }}
             />
             {pdfFiles.length > 0 && (
               <div className="border rounded-md px-3 divide-y divide-border">
@@ -369,9 +430,10 @@ export function IngestDialog({ isOpen, onOpenChange, activeCaseId, onIngested })
               </div>
             )}
             <Button variant="outline" size="sm" className="w-full"
-              onClick={() => pdfRef.current?.click()} disabled={isRunning}>
+              onClick={() => pdfRef.current?.click()}
+              disabled={isRunning || pdfFiles.length >= PDF_MAX_FILES}>
               <Upload className="w-3.5 h-3.5 mr-2" />
-              Choose PDF files…
+              {pdfFiles.length >= PDF_MAX_FILES ? `Limit reached (${PDF_MAX_FILES}/${PDF_MAX_FILES})` : 'Choose PDF files…'}
             </Button>
           </div>
         </div>

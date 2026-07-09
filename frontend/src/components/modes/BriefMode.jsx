@@ -339,7 +339,7 @@ function SectionCard({ icon: Icon, title, iconClass, children }) {
 
 // ── Main component ────────────────────────────────────────────────
 
-export default function BriefMode({ caseId }) {
+export default function BriefMode({ caseId, embedded = false }) {
   const [position, setPosition]   = useState('');
   const [committed, setCommitted] = useState('');
   const [brief, setBrief]         = useState(null);
@@ -398,22 +398,24 @@ export default function BriefMode({ caseId }) {
     </div>
   ) : null;
 
-  return (
-    <ModeFrame title="Trial Brief" subtitle={caseId || 'No case selected'} actions={actions} className="print-root">
+  const content = (
+    <>
       {/* Empty / input state */}
       {!brief && !loading && (
-        <div className="max-w-2xl mx-auto pt-8 space-y-6">
-          <EmptyState
-            icon={FileText}
-            title="Generate a trial brief"
-            description="Compiles witness profiles, contradictions, evidence map, and strategy from all case sources — grounded in real indexed evidence."
-          />
+        <div className="max-w-2xl mx-auto pt-4 space-y-6">
+          {!embedded && (
+            <EmptyState
+              icon={FileText}
+              title="Generate a trial brief"
+              description="Compiles witness profiles, contradictions, evidence map, and strategy from all case sources — grounded in real indexed evidence."
+            />
+          )}
           <div className="flex gap-2">
             <Input
               value={position}
               onChange={e => setPosition(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && run()}
-              placeholder="Your legal position…"
+              placeholder="Your legal position… e.g. I am defending the accused"
               className="flex-1"
               autoFocus
             />
@@ -594,6 +596,13 @@ export default function BriefMode({ caseId }) {
 
         </div>
       )}
+    </>
+  );
+
+  if (embedded) return <div className="print-root">{content}</div>;
+  return (
+    <ModeFrame title="Trial Brief" subtitle={caseId || 'No case selected'} actions={actions} className="print-root">
+      {content}
     </ModeFrame>
   );
 }
