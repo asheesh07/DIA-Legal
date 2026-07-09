@@ -4,14 +4,12 @@ import { Workspace } from '@/components/workspace/Workspace';
 import * as api from '@/api';
 
 const NewCaseDialog = lazy(() => import('../ingest/NewCaseDialog').then(m => ({ default: m.NewCaseDialog })));
-const IngestDialog  = lazy(() => import('../ingest/IngestDialog').then(m => ({ default: m.IngestDialog })));
 
 export function AppShell() {
   const [cases,         setCases]         = useState([]);
   const [activeCaseId,  setActiveCaseId]  = useState('');
   const [fileCount,     setFileCount]     = useState(0);
   const [isNewCaseOpen, setIsNewCaseOpen] = useState(false);
-  const [isIngestOpen,  setIsIngestOpen]  = useState(false);
 
   const fetchCases = useCallback(async () => {
     try {
@@ -53,10 +51,10 @@ export function AppShell() {
     }
   };
 
-  const handleIngested = () => {
+  const handleIngested = useCallback(() => {
     fetchCases();
     refreshFileCount(activeCaseId);
-  };
+  }, [fetchCases, refreshFileCount, activeCaseId]);
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
@@ -72,7 +70,7 @@ export function AppShell() {
         <Workspace
           caseId={activeCaseId}
           fileCount={fileCount}
-          onAddFiles={() => setIsIngestOpen(true)}
+          onIngested={handleIngested}
           onCreateCase={() => setIsNewCaseOpen(true)}
         />
       </div>
@@ -82,12 +80,6 @@ export function AppShell() {
           isOpen={isNewCaseOpen}
           onOpenChange={setIsNewCaseOpen}
           onCaseCreated={handleCaseCreated}
-        />
-        <IngestDialog
-          isOpen={isIngestOpen}
-          onOpenChange={setIsIngestOpen}
-          activeCaseId={activeCaseId}
-          onIngested={handleIngested}
         />
       </Suspense>
     </div>
