@@ -52,8 +52,13 @@ class IngestionPipeline:
     # ============================================================
 
     def _ingest_pdf(self, asset: PDFAsset, case_id: str, emit) -> Dict:
+        import time as _time
+        _t0 = _time.time()
+
         emit("reading")
         chunks = self.pdf_chunker.chunk(asset)
+        _t_read = _time.time()
+        print(f"[TIMING][PDF] reading+chunking: {_t_read - _t0:.2f}s  chunks={len(chunks)}", flush=True)
 
         if not chunks:
             return {
@@ -66,7 +71,10 @@ class IngestionPipeline:
         texts = [chunk.get("text", "") for chunk in chunks]
 
         emit("embedding")
+        _t_emb_start = _time.time()
         text_embeddings = self.embedder.text_embedder.embed_batch(texts)
+        _t_emb = _time.time()
+        print(f"[TIMING][PDF] embedding {len(texts)} chunks: {_t_emb - _t_emb_start:.2f}s", flush=True)
 
         visual_dim = (
             self.embedder.visual_embedder.embed_dim
@@ -101,7 +109,11 @@ class IngestionPipeline:
             })
 
         emit("indexing")
+        _t_idx_start = _time.time()
         self.vector_store.upsert(records)
+        _t_idx = _time.time()
+        print(f"[TIMING][PDF] indexing {len(records)} records: {_t_idx - _t_idx_start:.2f}s", flush=True)
+        print(f"[TIMING][PDF] TOTAL for {asset.original_name}: {_t_idx - _t0:.2f}s", flush=True)
 
         return {
             "status":         "success",

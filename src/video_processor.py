@@ -73,6 +73,9 @@ class VideoProcessor:
     # ── Public API ────────────────────────────────────────────────
 
     def process(self, asset, progress=None):
+        import time as _time
+        _t_total = _time.time()
+
         def emit(stage):
             if progress:
                 progress(stage)
@@ -80,28 +83,35 @@ class VideoProcessor:
         path = str(asset.stored_path)
 
         if _is_stream(path):
-            # YouTube: audio and frames both come from the stream URL via FFmpeg
             emit("extracting_audio")
+            _t1 = _time.time()
             audio_path = self.video_to_audio(asset)
             emit("sampling_frames")
             frames = self.video_to_images(asset)
+            print(f"[TIMING][VIDEO] ffmpeg (stream): {_time.time()-_t1:.2f}s", flush=True)
         else:
-            # Local file: run audio extraction and frame sampling concurrently
             emit("extracting_audio")
+            _t1 = _time.time()
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
                 audio_fut = pool.submit(self.video_to_audio, asset)
                 frame_fut = pool.submit(self.video_to_images, asset)
                 audio_path = audio_fut.result()
                 frames = frame_fut.result()
+            print(f"[TIMING][VIDEO] ffmpeg audio+frames (parallel): {_time.time()-_t1:.2f}s  frames={len(frames)}", flush=True)
 
         emit("transcribing")
+        _t2 = _time.time()
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             transcript_fut = pool.submit(self.audio_to_text, audio_path)
             frames_fut     = pool.submit(self.analyse_frames, frames)
             transcript = transcript_fut.result()
             analysed   = frames_fut.result()
+        print(f"[TIMING][VIDEO] transcribe+OCR (parallel): {_time.time()-_t2:.2f}s  segments={len(transcript)}", flush=True)
+
         emit("chunking")
-        return self.aligned_modalities(analysed, transcript, asset.case_id)
+        result = self.aligned_modalities(analysed, transcript, asset.case_id)
+        print(f"[TIMING][VIDEO] TOTAL process(): {_time.time()-_t_total:.2f}s", flush=True)
+        return result
 
     def process_from_files(self, audio_path: str, frames_dir: Path,
                            case_id: str, evidence_id: str, progress=None):
@@ -231,10 +241,14 @@ class VideoProcessor:
         return seen
 
     def audio_to_text(self, audio_path):
-        import whisperx
+        import whisperx, time as _time
+        _t0 = _time.time()
+
         result = self.model.transcribe(audio_path)
         language = result.get("language", "en")
+        print(f"[TIMING][VIDEO] whisper transcribe: {_time.time()-_t0:.2f}s  lang={language}", flush=True)
 
+        _t1 = _time.time()
         try:
             model_a, metadata = whisperx.load_align_model(
                 language_code=language, device=self.device
@@ -242,12 +256,15 @@ class VideoProcessor:
             result = whisperx.align(
                 result["segments"], model_a, metadata, audio_path, self.device
             )
+            print(f"[TIMING][VIDEO] alignment: {_time.time()-_t1:.2f}s", flush=True)
         except Exception as exc:
             print(f"[VideoProcessor] Alignment skipped: {exc}", flush=True)
 
+        _t2 = _time.time()
         try:
             diarize_segments = self.diarize_model(audio_path)
             result = whisperx.assign_word_speakers(diarize_segments, result)
+            print(f"[TIMING][VIDEO] diarization: {_time.time()-_t2:.2f}s", flush=True)
         except Exception as exc:
             print(f"[VideoProcessor] Diarization skipped: {exc}", flush=True)
 
@@ -276,11 +293,14 @@ class VideoProcessor:
     # ── Frame analysis ────────────────────────────────────────────
 
     def analyse_frames(self, frames_metadata):
+        import time as _time
+        _t0 = _time.time()
         # BLIP captioning is skipped on CPU — 600 MB model at ~3s/frame is
         # the dominant per-frame cost and adds little over OCR for legal docs.
         for f in frames_metadata:
             f["caption"]  = ""
             f["ocr_text"] = self._ocr(f["image_path"])
+        print(f"[TIMING][VIDEO] OCR {len(frames_metadata)} frames: {_time.time()-_t0:.2f}s", flush=True)
         return frames_metadata
 
     def _ocr(self, path):
