@@ -38,6 +38,9 @@ class DIAPipeline:
         routing = self.query_router.route(query)
         mode = routing["mode"]
 
+        if mode == "direct":
+            return self._answer_direct(query, history or [])
+
         chunks_for_indexing = self.chunks_store.get(case_id)
 
         # HierarchicalRetriever.retrieve() signature is compatible
@@ -153,6 +156,36 @@ class DIAPipeline:
         return result
 
     # ─── Helpers ─────────────────────────────────────────────────────────────
+
+
+    def _answer_direct(self, query: str, history: list) -> dict:
+        history_ctx = ""
+        for m in (history or [])[-4:]:
+            role = "User" if m["role"] == "user" else "Assistant"
+            history_ctx += f"{role}: {m['content']}
+"
+
+        context_package = {
+            "system_prompt": (
+                "You are an expert legal assistant with comprehensive knowledge of Indian law "
+                "(IPC, CrPC, Indian Evidence Act, Constitution, and other statutes). "
+                "Answer the following question accurately and concisely from your legal knowledge. "
+                "This is a general legal question — do not reference any case files."
+            ),
+            "context": history_ctx.strip(),
+            "user_prompt": (
+                f"Question: {query}
+
+"
+                "Respond with JSON only:
+"
+                '{"answer": "your detailed answer", "supporting_evidence": [], "confidence": 0.9}'
+            ),
+            "citation_map": {},
+        }
+        result = self.llm_answerer.answer(context_package, retrieval_confidence=1.0, mode="direct")
+        result["citations"] = []
+        return result
 
     def _build_trace(self, all_candidates, final_items, critic_rounds=0) -> Dict:
         """
