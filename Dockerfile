@@ -1,6 +1,9 @@
 FROM python:3.10
 
 ENV PYTHONUNBUFFERED=1
+# Pin HuggingFace cache here (before any RUN that uses it) so
+# pre-warmed models land in a path both root and the app user can read.
+ENV HF_HOME=/app/.cache/huggingface
 
 RUN apt-get update && apt-get install -y \
     build-essential \
@@ -26,33 +29,26 @@ RUN apt-get update && apt-get install -y \
 RUN useradd -m -u 1000 user
 WORKDIR /app
 
-# Python deps — cached layer unless requirements.txt changes
+# ── Python deps (cached unless requirements.txt changes) ──────────
 COPY requirements.txt .
 RUN pip install --upgrade pip setuptools wheel cython \
     && pip install --no-cache-dir -r requirements.txt
 
-# npm deps — cached layer unless package-lock.json changes
-COPY frontend/package*.json ./frontend/
-RUN cd frontend && npm ci
-
-# Copy full source, then build the frontend
-COPY --chown=user . .
-RUN cd frontend && npm run build
-
-# Pin the HuggingFace cache to a fixed path so pre-warmed models are
-# found when the app later runs as 'user'. Without this, pre-warming
-# caches to /root/.cache/ but the app looks in /home/user/.cache/ —
-# completely different directories, so every first request re-downloads.
-ENV HF_HOME=/app/.cache/huggingface
+# ── Pre-warm models (cached after first build, never re-run unless
+#    requirements.txt changes — models live in the image layer) ────
 RUN mkdir -p /app/.cache/huggingface
-
-# Pre-download models into the shared cache path set above.
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 RUN python -c "from sentence_transformers import CrossEncoder; CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')"
 
-# data/ is gitignored so COPY never creates it.
-# Pre-create it as root then hand ownership to the app user
-# so runtime mkdir/write calls succeed.
+# ── npm deps (cached unless package-lock.json changes) ───────────
+COPY frontend/package*.json ./frontend/
+RUN cd frontend && npm ci
+
+# ── Copy source and build frontend ───────────────────────────────
+COPY --chown=user . .
+RUN cd frontend && npm run build
+
+# ── Runtime data directory owned by app user ─────────────────────
 RUN mkdir -p /app/data/tmp /app/data/cases /app/data/lancedb \
     && chown -R user:user /app/data /app/.cache
 
