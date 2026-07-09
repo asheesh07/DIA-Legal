@@ -13,6 +13,7 @@ contradiction_detector.py needs to change.
 """
 
 import asyncio
+import os
 from typing import Optional, Dict, List
 
 
@@ -31,6 +32,9 @@ class DIAPipeline:
         self.query_router = query_router
         # chunks_store: {case_id: [chunk_dicts]} for BM25 indexing
         self.chunks_store = chunks_store or {}
+        self.enable_llm_filter = os.getenv("ENABLE_LLM_RETRIEVAL_FILTER", "0").lower() in {
+            "1", "true", "yes", "on"
+        }
 
     # ─── Mode 1: Standard query (same interface as original) ─────────────────
 
@@ -61,17 +65,19 @@ class DIAPipeline:
 
         original_retrieved = list(retrieved_items)
         
-        # Lightweight LLM filter (unchanged)
-        retrieved_items_raw = self._items_to_filter_format(retrieved_items)
-        filtered = self.llm_answerer.llm_client.filter_chunks(
-            query, retrieved_items_raw
-        )
-        # filter_chunks returns chunk dicts — rebuild RetrievedItems
-        if filtered and isinstance(filtered[0], dict):
-            retrieved_items = self.retriever._build_retrieved_items(
-                filtered,
-                self.retriever._estimate_confidence(filtered)
-            ) if hasattr(self.retriever, "_build_retrieved_items") else retrieved_items
+        if self.enable_llm_filter:
+            # Optional quality pass. Disabled by default because it adds a
+            # second remote LLM round trip to every user query.
+            retrieved_items_raw = self._items_to_filter_format(retrieved_items)
+            filtered = self.llm_answerer.llm_client.filter_chunks(
+                query, retrieved_items_raw
+            )
+            # filter_chunks returns chunk dicts — rebuild RetrievedItems
+            if filtered and isinstance(filtered[0], dict):
+                retrieved_items = self.retriever._build_retrieved_items(
+                    filtered,
+                    self.retriever._estimate_confidence(filtered)
+                ) if hasattr(self.retriever, "_build_retrieved_items") else retrieved_items
 
         retrieval_confidence = self.retriever._estimate_confidence(
             self._items_to_filter_format(retrieved_items)

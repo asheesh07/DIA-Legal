@@ -75,6 +75,7 @@ class Retriever:
         self.mmr_lambda = mmr_lambda
         self.min_score_threshold = min_threshold
         self.temporary_window= temporary_window
+        self._query_type_prototypes = None
         
     def retrieve(self,case_id,query,filters=None,top_k=5,**kwargs):
         if not query or not query.strip():
@@ -82,11 +83,13 @@ class Retriever:
         
         query= self._process_query(query)
         
-        query_embed = self.embedder.embed_query(query)
-        text_embedding = query_embed['text_query_embedding']
-        visual_embedding = query_embed['visual_query_embedding']
-        
         query_type = self._classify_query(query)
+        alpha = self._adaptive_alpha(query_type)
+
+        text_embedding = self.embedder.text_embedder.query(query)
+        visual_embedding = None
+        if alpha < 0.8 and self.embedder.visual_embedder:
+            visual_embedding = self.embedder.visual_embedder.embed_query_text(query)
         
         temporal_constraints = self._extract_temporal(query)
         
@@ -102,8 +105,6 @@ class Retriever:
                 
             }
             
-        alpha = self._adaptive_alpha(query_type)
-        
         max_candidates = kwargs.get('max_candidates',self.max_candidates)
         candidates = self._retrieve_candidates(text_embedding,visual_embedding,alpha,effective_filters,max_candidates)
         candidates = self._expand_temporal(case_id,candidates)    
@@ -122,22 +123,28 @@ class Retriever:
         return retrieved_items
         
     def _classify_query(self,query):
-        prototypes = {
-            QueryType.SPEECH: self.embedder.embed_query("What did someone say?"),
-            QueryType.VISUAL: self.embedder.embed_query("Is something visible in the video?"),
-            QueryType.TEMPORAL: self.embedder.embed_query("What happened at a specific time?"),
-            QueryType.OCR: self.embedder.embed_query("Find text visible in a frame."),
-            QueryType.EVIDENCE: self.embedder.embed_query("Find supporting or contradicting evidence."),
-            QueryType.SEMANTIC: self.embedder.embed_query("Answer a general question about events.")
-       
-        }
-        
-        query_vec = self.embedder.embed_query(query)['text_query_embedding']
+        if self._query_type_prototypes is None:
+            prompts = {
+                QueryType.SPEECH: "What did someone say?",
+                QueryType.VISUAL: "Is something visible in the video?",
+                QueryType.TEMPORAL: "What happened at a specific time?",
+                QueryType.OCR: "Find text visible in a frame.",
+                QueryType.EVIDENCE: "Find supporting or contradicting evidence.",
+                QueryType.SEMANTIC: "Answer a general question about events.",
+            }
+            labels = list(prompts.keys())
+            vectors = self.embedder.text_embedder.embed_batch(list(prompts.values()))
+            self._query_type_prototypes = {
+                label: vectors[i]
+                for i, label in enumerate(labels)
+            }
+
+        query_vec = self.embedder.text_embedder.query(query)
         
         raw_scores = {}
         
-        for qtype , proto_vec in prototypes.items():
-            raw_scores[qtype] = np.dot(proto_vec['text_query_embedding'],query_vec)
+        for qtype , proto_vec in self._query_type_prototypes.items():
+            raw_scores[qtype] = np.dot(proto_vec,query_vec)
             
         scores = np.array(list(raw_scores.values()))
         
@@ -506,11 +513,20 @@ class Retriever:
                 rerank_score=reranker_score,
                 final_score=final_score,
                 confidence=confidence,
-                retrieval_stage=retrieval_stage
+                retrieval_stage=retrieval_stage,
+                metadata={
+                    "source_id": c.get("source_id", ""),
+                    "source_type": c.get("source_type", "video"),
+                    "original_name": c.get("original_name", ""),
+                    "section_title": c.get("section_title", ""),
+                    "section_type": c.get("section_type", ""),
+                    "page_span_start": c.get("page_span_start", 0),
+                    "page_span_end": c.get("page_span_end", 0),
+                    "page_span": c.get("page_span", {}),
+                }
                 
                 
             )
             retrieved_items.append(item)
         return retrieved_items
         
-

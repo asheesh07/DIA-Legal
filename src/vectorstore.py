@@ -2,12 +2,15 @@ import lancedb
 import pyarrow as pa
 import numpy as np
 import json
+import threading
 class LanceDBVectorStore:
     def __init__(self,table_name,db_path,text_dim,visual_dim):
         self.db = lancedb.connect(db_path)
         self.table_name = table_name
         self.text_dim = text_dim
         self.visual_dim = visual_dim
+        self._stats_cache = {}
+        self._stats_lock = threading.Lock()
         self._init_table()
 
     def _init_table(self):
@@ -95,21 +98,34 @@ class LanceDBVectorStore:
             })
 
         self.table.add(formatted)
+        self._invalidate_stats({r["case_id"] for r in formatted})
         
     def search(self, text_query_embedding, visual_query_embedding, alpha, top_k, filters=None):
 
         if text_query_embedding is not None:
-            candidates = (
+            query = (
                 self.table.search(
                     text_query_embedding,
                     vector_column_name="text_embedding",
                 )
                 .metric("cosine")
-                .limit(top_k * 5)
-                .to_list()
             )
+            where_sql = self._where_clause(filters)
+            if where_sql:
+                try:
+                    query = query.where(where_sql, prefilter=True)
+                except TypeError:
+                    query = query.where(where_sql)
+            candidates = query.limit(top_k * 5).to_list()
         else:
-            candidates = self.table.to_pandas().to_dict(orient="records")
+            where_sql = self._where_clause(filters)
+            try:
+                query = self.table.search()
+                if where_sql:
+                    query = query.where(where_sql)
+                candidates = query.limit(max(top_k * 5, top_k)).to_list()
+            except Exception:
+                candidates = self.table.to_pandas().to_dict(orient="records")
 
         for c in candidates:
             structured_raw = c.get("structured_data")
@@ -166,15 +182,36 @@ class LanceDBVectorStore:
         scored.sort(key=lambda x: x.get("score", 0.0), reverse=True)
 
         return scored[:top_k]
-    
+
+    def _where_clause(self, filters):
+        if not filters:
+            return None
+        clauses = []
+        case_id = filters.get("case_id")
+        if case_id:
+            escaped = str(case_id).replace("'", "''")
+            clauses.append(f"case_id = '{escaped}'")
+        time_range = filters.get("time_range")
+        if time_range:
+            start = time_range.get("start")
+            if start is None:
+                start = time_range.get("start_time")
+            end = time_range.get("end")
+            if end is None:
+                end = time_range.get("end_time")
+            if start is not None:
+                clauses.append(f"end_time >= {float(start)}")
+            if end is not None and end != float("inf"):
+                clauses.append(f"start_time <= {float(end)}")
+        return " AND ".join(clauses) if clauses else None
     def _match_filters(self,record,filters):
         for key,value in filters.items():
             if key == "case_id":
                 if record['case_id'] != value:
                     return False
             elif key == "time_range":
-                start = value.get('start')
-                end = value.get('end')
+                start = value.get('start', value.get('start_time'))
+                end = value.get('end', value.get('end_time'))
                 
                 if start is not None and record['end_time']<start:
                     return False
@@ -186,8 +223,18 @@ class LanceDBVectorStore:
         return True
     
     def get_case_stats(self, case_id: str) -> dict:
-        df = self.table.to_pandas()
-        case_df = df[df["case_id"] == case_id]
+        with self._stats_lock:
+            cached = self._stats_cache.get(case_id)
+            if cached is not None:
+                return dict(cached)
+
+        try:
+            escaped = str(case_id).replace("'", "''")
+            case_df = self.table.search().where(f"case_id = '{escaped}'").to_pandas()
+        except Exception:
+            df = self.table.to_pandas()
+            case_df = df[df["case_id"] == case_id]
+
         chunk_count = len(case_df)
 
         doc_keys = set()
@@ -205,23 +252,28 @@ class LanceDBVectorStore:
             if data.get("has_frames"):
                 image_count += len(data.get("frames", []))
 
-        return {
+        stats = {
             "chunk_count":    chunk_count,
             "document_count": len(doc_keys),
             "image_count":    image_count,
         }
+        with self._stats_lock:
+            self._stats_cache[case_id] = dict(stats)
+        return stats
 
     def count_table_rows(self):
         return self.table.count_rows()
-    
     def clear(self):
         self.db.drop_table(self.table_name)
         self._create_table()
-    
+        with self._stats_lock:
+            self._stats_cache.clear()
+
+    def _invalidate_stats(self, case_ids):
+        with self._stats_lock:
+            for case_id in case_ids:
+                self._stats_cache.pop(case_id, None)
     def get(self,chunk_ids):
         return self.table.search().where(
             f"chunk_id in {chunk_ids}"
         ).to_list()
-            
-        
-    

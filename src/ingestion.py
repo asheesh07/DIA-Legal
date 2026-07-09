@@ -2,6 +2,7 @@ from typing import Dict, Callable, Optional
 from src.reader import PDFAsset
 from src.chunker import PDFChunker
 import numpy as np
+import os
 
 
 class IngestionPipeline:
@@ -138,70 +139,8 @@ class IngestionPipeline:
         if not chunks:
             return {"status": "success", "case_id": case_id, "source": "video", "chunks_indexed": 0}
 
-        # Batch all text embeddings in one model call
         emit("embedding")
-        texts = [self.embedder._build_text_blob(chunk) for chunk in chunks]
-        text_embeddings = self.embedder.text_embedder.embed_batch(texts)
-
-        # Visual embeddings per chunk (each chunk's frames are already small)
-        visual_dim = (
-            self.embedder.visual_embedder.embed_dim
-            if self.embedder.visual_embedder else 512
-        )
-
-        records = []
-        self.vector_store.clear()
-
-        for i, chunk in enumerate(chunks):
-            text_emb = text_embeddings[i].tolist()
-
-            visual_emb = None
-            if self.embedder.visual_embedder and chunk.get("frames"):
-                frame_paths = [
-                    f["image_path"] for f in chunk["frames"] if f.get("image_path")
-                ]
-                if frame_paths:
-                    vecs = self.embedder.visual_embedder.embed_batch(frame_paths)
-                    agg = self.embedder.visual_embedder.aggregate(vecs)
-                    visual_emb = agg.tolist()
-            if visual_emb is None:
-                visual_emb = [0.0] * visual_dim
-
-            transcript_text = " ".join(
-                f"[{seg.get('speaker','?')}] {seg.get('text','')}"
-                for seg in chunk.get("transcript_segments", [])
-            )
-            speakers = list({
-                seg.get("speaker") for seg in chunk.get("transcript_segments", [])
-                if seg.get("speaker")
-            })
-
-            has_ocr    = any(f.get("ocr_text") for f in chunk.get("frames", []))
-            has_frames = bool(chunk.get("frames"))
-
-            records.append({
-                "chunk_id":   chunk["chunk_id"],
-                "case_id":    case_id,
-                "start_time": float(chunk["time_range"]["start"]),
-                "end_time":   float(chunk["time_range"]["end"]),
-
-                "text_embedding":   text_emb,
-                "visual_embedding": visual_emb,
-
-                "transcript_segments": chunk.get("transcript_segments", []),
-                "frames":          chunk.get("frames", []),
-                "transcript_text": transcript_text,
-                "speakers":        speakers,
-                "has_ocr":         has_ocr,
-                "has_frames":      has_frames,
-                "source_type":     asset.source_type,
-
-                "source_id":     "",
-                "original_name": "",
-                "section_title": "",
-                "section_type":  "",
-                "page_span":     {},
-            })
+        records = self._build_video_records(chunks, case_id, asset.source_type)
 
         emit("indexing")
         self.vector_store.upsert(records)
@@ -258,6 +197,19 @@ class IngestionPipeline:
             return {"status": "success", "case_id": case_id, "source": "video", "chunks_indexed": 0}
 
         emit("embedding")
+        records = self._build_video_records(chunks, case_id, source_type)
+
+        emit("indexing")
+        self.vector_store.upsert(records)
+
+        return {
+            "status":         "success",
+            "case_id":        case_id,
+            "source":         "video",
+            "chunks_indexed": len(records),
+        }
+
+    def _build_video_records(self, chunks, case_id: str, source_type: str):
         texts = [self.embedder._build_text_blob(chunk) for chunk in chunks]
         text_embeddings = self.embedder.text_embedder.embed_batch(texts)
 
@@ -265,24 +217,40 @@ class IngestionPipeline:
             self.embedder.visual_embedder.embed_dim
             if self.embedder.visual_embedder else 512
         )
+        zero_visual = [0.0] * visual_dim
+        frame_vectors = {}
+        index_visual = (
+            self.embedder.visual_embedder is not None
+            and os.getenv("INDEX_VISUAL_EMBEDDINGS", "0").lower() in {"1", "true", "yes", "on"}
+        )
+
+        if index_visual:
+            frame_paths = []
+            for chunk in chunks:
+                for frame in chunk.get("frames", []):
+                    path = frame.get("image_path")
+                    key = str(path) if path else ""
+                    if key and key not in frame_vectors:
+                        frame_vectors[key] = None
+                        frame_paths.append(path)
+            if frame_paths:
+                vectors = self.embedder.visual_embedder.embed_batch(frame_paths)
+                for path, vec in zip(frame_paths, vectors):
+                    frame_vectors[str(path)] = vec
 
         records = []
-        self.vector_store.clear()
-
         for i, chunk in enumerate(chunks):
-            text_emb = text_embeddings[i].tolist()
-
-            visual_emb = None
-            if self.embedder.visual_embedder and chunk.get("frames"):
-                frame_paths = [
-                    f["image_path"] for f in chunk["frames"] if f.get("image_path")
-                ]
-                if frame_paths:
-                    vecs = self.embedder.visual_embedder.embed_batch(frame_paths)
-                    agg = self.embedder.visual_embedder.aggregate(vecs)
-                    visual_emb = agg.tolist()
-            if visual_emb is None:
-                visual_emb = [0.0] * visual_dim
+            chunk_frame_vectors = [
+                frame_vectors[str(f["image_path"])]
+                for f in chunk.get("frames", [])
+                if f.get("image_path") and frame_vectors.get(str(f["image_path"])) is not None
+            ]
+            if chunk_frame_vectors:
+                visual_emb = self.embedder.visual_embedder.aggregate(
+                    np.vstack(chunk_frame_vectors)
+                ).tolist()
+            else:
+                visual_emb = zero_visual
 
             transcript_text = " ".join(
                 f"[{seg.get('speaker','?')}] {seg.get('text','')}"
@@ -299,7 +267,7 @@ class IngestionPipeline:
                 "start_time": float(chunk["time_range"]["start"]),
                 "end_time":   float(chunk["time_range"]["end"]),
 
-                "text_embedding":   text_emb,
+                "text_embedding":   text_embeddings[i].tolist(),
                 "visual_embedding": visual_emb,
 
                 "transcript_segments": chunk.get("transcript_segments", []),
@@ -316,13 +284,4 @@ class IngestionPipeline:
                 "section_type":  "",
                 "page_span":     {},
             })
-
-        emit("indexing")
-        self.vector_store.upsert(records)
-
-        return {
-            "status":         "success",
-            "case_id":        case_id,
-            "source":         "video",
-            "chunks_indexed": len(records),
-        }
+        return records
