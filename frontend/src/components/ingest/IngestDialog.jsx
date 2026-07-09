@@ -109,7 +109,7 @@ export function IngestDialog({ isOpen, onOpenChange, activeCaseId, onIngested })
   const pdfRef   = useRef(null);
 
   const validYtUrls = ytUrls.filter(u => u.trim());
-  const totalQueued = validYtUrls.length + videoFiles.length + (pdfFiles.length > 0 ? 1 : 0);
+  const totalQueued = validYtUrls.length + videoFiles.length + pdfFiles.length;
   const hasStarted  = Object.keys(items).length > 0;
   const allDone     = hasStarted && Object.values(items).every(
     s => s.status === 'success' || s.status === 'cached' || s.status === 'error'

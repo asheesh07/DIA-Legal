@@ -11,6 +11,7 @@ const api = axios.create({
 })
 
 export const getCases = () => api.get('/cases')
+export const createCase = (case_id) => api.post('/cases', { case_id })
 export const deleteCase = (id) => api.delete(`/cases/${id}`)
 export const getCaseStats = (case_id) => api.get(`/cases/${case_id}/stats`)
 

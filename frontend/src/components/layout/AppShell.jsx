@@ -33,8 +33,13 @@ export function AppShell() {
 
   useEffect(() => { refreshFileCount(activeCaseId); }, [activeCaseId, refreshFileCount]);
 
-  const handleCaseCreated = (newCaseName) => {
-    fetchCases();
+  const handleCaseCreated = async (newCaseName) => {
+    try {
+      await api.createCase(newCaseName);
+    } catch (err) {
+      console.error('Failed to register session:', err);
+    }
+    await fetchCases();
     setActiveCaseId(newCaseName);
   };
 

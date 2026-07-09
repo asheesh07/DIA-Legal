@@ -264,6 +264,9 @@ class YouTubeIngestRequest(BaseModel):
     case_id: str
     url: str
 
+class CreateCaseRequest(BaseModel):
+    case_id: str
+
 
 # ════════════════════════════════════════════════════════════════
 # HEALTH — no ML needed, always fast
@@ -277,6 +280,18 @@ def health():
 # ════════════════════════════════════════════════════════════════
 # ROUTES — CASES
 # ════════════════════════════════════════════════════════════════
+
+@app.post("/api/cases")
+def create_case(body: CreateCaseRequest):
+    case_id = body.case_id.strip()
+    if not case_id:
+        raise HTTPException(status_code=400, detail="case_id is required")
+    cases = _load_cases()
+    if case_id not in cases:
+        cases[case_id] = {"sources": [], "total_chunks": 0}
+        _save_cases(cases)
+    return {"case_id": case_id}
+
 
 @app.get("/api/cases")
 def list_cases():
