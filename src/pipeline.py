@@ -162,8 +162,7 @@ class DIAPipeline:
         history_ctx = ""
         for m in (history or [])[-4:]:
             role = "User" if m["role"] == "user" else "Assistant"
-            history_ctx += f"{role}: {m['content']}
-"
+            history_ctx += role + ": " + m["content"] + "\n"
 
         context_package = {
             "system_prompt": (
@@ -174,11 +173,8 @@ class DIAPipeline:
             ),
             "context": history_ctx.strip(),
             "user_prompt": (
-                f"Question: {query}
-
-"
-                "Respond with JSON only:
-"
+                "Question: " + query + "\n\n"
+                "Respond with JSON only:\n"
                 '{"answer": "your detailed answer", "supporting_evidence": [], "confidence": 0.9}'
             ),
             "citation_map": {},
