@@ -21,6 +21,7 @@ from pydantic import BaseModel
 import asyncio
 import concurrent.futures
 import queue as _queue
+import threading
 import time
 import shutil
 import uuid as _uuid
@@ -42,6 +43,7 @@ VIDEO_MAX_BYTES     = 250 * 1024 * 1024   # 250 MB
 
 # ── Global system instances ───────────────────────────────────────
 _systems = {}
+_systems_lock = threading.Lock()
 
 # ── Lifespan ──────────────────────────────────────────────────────
 @asynccontextmanager
@@ -72,13 +74,15 @@ async def add_process_time_header(request: Request, call_next):
 # ── Lazy system loader ────────────────────────────────────────────
 def get_systems():
     if not _systems:
-        print("[DIA-Legal] Loading ML systems...", flush=True)
-        try:
-            _systems.update(_build_systems())
-        except Exception as exc:
-            print(f"[DIA-Legal] STARTUP ERROR: {exc}", flush=True)
-            raise HTTPException(status_code=503, detail=str(exc))
-        print("[DIA-Legal] ML systems ready.", flush=True)
+        with _systems_lock:
+            if not _systems:
+                print("[DIA-Legal] Loading ML systems...", flush=True)
+                try:
+                    _systems.update(_build_systems())
+                except Exception as exc:
+                    print(f"[DIA-Legal] STARTUP ERROR: {exc}", flush=True)
+                    raise HTTPException(status_code=503, detail=str(exc))
+                print("[DIA-Legal] ML systems ready.", flush=True)
     return _systems
 
 # ── System bootstrap ──────────────────────────────────────────────

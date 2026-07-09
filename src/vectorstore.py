@@ -8,11 +8,19 @@ class LanceDBVectorStore:
         self.table_name = table_name
         self.text_dim = text_dim
         self.visual_dim = visual_dim
-        
-        if self.table_name not in self.db.table_names():
-            self._create_table()
-        else:
-            self.table = self.db.open_table(table_name)
+        self._init_table()
+
+    def _init_table(self):
+        try:
+            if self.table_name in self.db.table_names():
+                self.table = self.db.open_table(self.table_name)
+            else:
+                self._create_table()
+        except Exception as e:
+            if "already exists" in str(e).lower():
+                self.table = self.db.open_table(self.table_name)
+            else:
+                raise
     def _create_table(self):
         schema = pa.schema([
             ("chunk_id",         pa.string()),
