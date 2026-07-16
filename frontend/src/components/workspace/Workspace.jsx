@@ -20,6 +20,10 @@ import {
 import {
   Sheet, SheetContent, SheetHeader, SheetTitle,
 } from '@/components/ui/sheet';
+import {
+  Popover, PopoverContent, PopoverTrigger,
+} from '@/components/ui/popover';
+import { Video, File } from 'lucide-react';
 
 // ── File limits ───────────────────────────────────────────────────
 const PDF_MAX_FILES   = 5;
@@ -109,7 +113,7 @@ function TypingIndicator() {
 }
 
 // ── Main workspace ────────────────────────────────────────────────
-export function Workspace({ caseId, fileCount, onIngested, onCreateCase }) {
+export function Workspace({ caseId, sources = [], onIngested, onCreateCase }) {
   const [messages,            setMessages]            = useState([]);
   const [input,               setInput]               = useState('');
   const [loading,             setLoading]             = useState(false);
@@ -285,10 +289,6 @@ export function Workspace({ caseId, fileCount, onIngested, onCreateCase }) {
 
   if (!caseId) return <NoSession onCreateCase={onCreateCase} />;
 
-  const fileLabel = fileCount > 0
-    ? `${fileCount} file${fileCount !== 1 ? 's' : ''} in this session`
-    : 'No files yet';
-
   return (
     <div className="flex flex-col h-full">
 
@@ -407,10 +407,41 @@ export function Workspace({ caseId, fileCount, onIngested, onCreateCase }) {
               <Paperclip className="w-3.5 h-3.5" />
               Add files
             </Button>
-            <span className="text-xs text-muted-foreground flex items-center gap-1">
-              <FileText className="w-3 h-3" />
-              {fileLabel}
-            </span>
+
+            {sources.length === 0 ? (
+              <span className="text-xs text-muted-foreground flex items-center gap-1">
+                <FileText className="w-3 h-3" />
+                No files yet
+              </span>
+            ) : (
+              <Popover>
+                <PopoverTrigger asChild>
+                  <button className="text-xs text-muted-foreground flex items-center gap-1 hover:text-foreground transition-colors">
+                    <FileText className="w-3 h-3" />
+                    {sources.length} file{sources.length !== 1 ? 's' : ''} in this session
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent side="top" align="start" className="w-72 p-2">
+                  <p className="text-xs font-medium text-muted-foreground px-2 py-1 mb-1">
+                    Files in this session
+                  </p>
+                  <div className="space-y-0.5 max-h-48 overflow-y-auto">
+                    {sources.map((s, i) => {
+                      const isVideo = s.type === 'video' || s.type === 'Youtube' || s.type === 'Local';
+                      return (
+                        <div key={i} className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-muted text-sm">
+                          {isVideo
+                            ? <Video className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+                            : <File className="w-3.5 h-3.5 text-orange-500 shrink-0" />}
+                          <span className="truncate flex-1 text-foreground">{s.name}</span>
+                          <span className="text-xs text-muted-foreground shrink-0">{s.chunks} chunks</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </PopoverContent>
+              </Popover>
+            )}
           </div>
         </div>
       </div>

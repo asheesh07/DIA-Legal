@@ -1,3 +1,9 @@
+# CPU-only torch wheels (the PyPI default bundles CUDA — ~5GB of dead weight
+# on a CPU Space). The +cpu builds only exist on the pytorch index.
+--extra-index-url https://download.pytorch.org/whl/cpu
+# av must come as a prebuilt wheel — its sdist won't compile against ffmpeg 7.
+--only-binary=av
+
 fastapi==0.115.0
 uvicorn[standard]==0.30.0
 python-multipart==0.0.9
@@ -5,10 +11,13 @@ pydantic==2.7.0
 python-dotenv==1.0.0
 
 # ML
-torch
+torch==2.6.0+cpu; sys_platform == 'linux'
+torch==2.6.0; sys_platform != 'linux'
+torchaudio==2.6.0+cpu; sys_platform == 'linux'
+torchaudio==2.6.0; sys_platform != 'linux'
 transformers
 sentence-transformers
-huggingface-hub
+huggingface-hub>=1.5.0,<2.0
 
 # Embeddings & retrieval
 lancedb
@@ -19,7 +28,7 @@ rank-bm25
 ffmpeg-python
 whisperx
 yt-dlp
-opencv-python
+opencv-python-headless
 pytesseract
 
 # PDF

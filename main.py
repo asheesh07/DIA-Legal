@@ -28,7 +28,12 @@ import uuid as _uuid
 print("FastAPI imported", flush=True)
 
 from dotenv import load_dotenv
-load_dotenv()
+try:
+    dotenv_path = Path(".env")
+    if dotenv_path.exists():
+        load_dotenv(dotenv_path=dotenv_path, override=False)
+except Exception as exc:
+    print(f"[DIA-Legal] Skipping .env load: {exc}", flush=True)
 
 # ── Constants ─────────────────────────────────────────────────────
 BASE_STORAGE = "data"

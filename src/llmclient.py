@@ -24,16 +24,14 @@ class LLMClient:
     ):
 
         self.api_token = api_token or os.getenv("HF_TOKEN")
-
-        if not self.api_token:
-            raise ValueError(
-                "HF_TOKEN not found. Set it as an environment variable."
+        self.client = None
+        if self.api_token:
+            self.client = InferenceClient(
+                model=model,
+                token=self.api_token
             )
-
-        self.client = InferenceClient(
-            model=model,
-            token=self.api_token
-        )
+        else:
+            print("[LLMClient] HF_TOKEN missing; running in fallback mode.", flush=True)
 
         self.model = model
         self.temperature = temperature
@@ -65,6 +63,31 @@ EVIDENCE BLOCKS:
         print("--- FULL PROMPT LENGTH ---", len(full_prompt), flush=True)
         if len(full_prompt) < 1000:
             print("--- FULL PROMPT ---", full_prompt, flush=True)
+
+        if self.client is None:
+            answer_text = (
+                "The language model is currently unavailable, so I can only provide a "
+                "limited evidence-based response from the retrieved context."
+            )
+            cited_blocks = []
+            llm_confidence = 0.0
+            latency = round(float(time.time() - start_time), 3)
+            validated_citations = self._validate_citations(cited_blocks, citation_map)
+            final_confidence = self._compute_final_confidence(
+                retrieval_confidence,
+                len(validated_citations)
+            )
+            return {
+                "answer": answer_text,
+                "citations": validated_citations,
+                "confidence": final_confidence,
+                "mode": mode,
+                "llm_metadata": {
+                    "model": self.model,
+                    "latency_seconds": latency,
+                    "cited_blocks_count": len(validated_citations)
+                }
+            }
 
         try:
             response = self.client.chat_completion(
@@ -199,6 +222,8 @@ EVIDENCE BLOCKS:
         Returns raw text response.
         Used by EvidenceClassifier, ContradictionDetector etc.
         """
+        if self.client is None:
+            return "{}"
         try:
             response = self.client.chat_completion(
                 messages=[
@@ -293,4 +318,3 @@ Respond ONLY in valid JSON format exactly like this:
             return filtered_items
         except Exception:
             return retrieved_items[:3]
-

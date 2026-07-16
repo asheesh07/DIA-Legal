@@ -8,7 +8,6 @@ const NewCaseDialog = lazy(() => import('../ingest/NewCaseDialog').then(m => ({ 
 export function AppShell() {
   const [cases,         setCases]         = useState([]);
   const [activeCaseId,  setActiveCaseId]  = useState('');
-  const [fileCount,     setFileCount]     = useState(0);
   const [isNewCaseOpen, setIsNewCaseOpen] = useState(false);
 
   const fetchCases = useCallback(async () => {
@@ -22,21 +21,13 @@ export function AppShell() {
 
   useEffect(() => { fetchCases(); }, [fetchCases]);
 
-  const refreshFileCount = useCallback((caseId) => {
-    if (!caseId) { setFileCount(0); return; }
-    api.getCaseStats(caseId)
-      .then(res => setFileCount(res.data?.document_count || 0))
-      .catch(() => setFileCount(0));
-  }, []);
-
-  useEffect(() => { refreshFileCount(activeCaseId); }, [activeCaseId, refreshFileCount]);
+  // Derive sources directly from the cases registry — no ML needed,
+  // no getCaseStats call that requires get_systems() to be loaded.
+  const activeCase = cases.find(c => c.case_id === activeCaseId);
+  const activeSources = activeCase?.sources || [];
 
   const handleCaseCreated = async (newCaseName) => {
-    try {
-      await api.createCase(newCaseName);
-    } catch (err) {
-      console.error('Failed to register session:', err);
-    }
+    try { await api.createCase(newCaseName); } catch (err) { console.error(err); }
     await fetchCases();
     setActiveCaseId(newCaseName);
   };
@@ -45,16 +36,13 @@ export function AppShell() {
     try {
       await api.deleteCase(id);
       fetchCases();
-      if (activeCaseId === id) { setActiveCaseId(''); setFileCount(0); }
-    } catch (err) {
-      console.error(err);
-    }
+      if (activeCaseId === id) setActiveCaseId('');
+    } catch (err) { console.error(err); }
   };
 
   const handleIngested = useCallback(() => {
     fetchCases();
-    refreshFileCount(activeCaseId);
-  }, [fetchCases, refreshFileCount, activeCaseId]);
+  }, [fetchCases]);
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
@@ -69,7 +57,7 @@ export function AppShell() {
       <div className="flex-1 min-w-0">
         <Workspace
           caseId={activeCaseId}
-          fileCount={fileCount}
+          sources={activeSources}
           onIngested={handleIngested}
           onCreateCase={() => setIsNewCaseOpen(true)}
         />

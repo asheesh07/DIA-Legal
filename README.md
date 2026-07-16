@@ -1,3 +1,13 @@
+---
+title: DIA Legal
+emoji: ⚖️
+colorFrom: blue
+colorTo: gray
+sdk: docker
+app_port: 8000
+pinned: false
+---
+
 <div align="center">
 
 # ⚖️ DIA-Legal
