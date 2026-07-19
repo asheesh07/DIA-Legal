@@ -26,9 +26,12 @@ class LLMClient:
         self.api_token = api_token or os.getenv("HF_TOKEN")
         self.client = None
         if self.api_token:
+            # timeout keeps a stalled provider call from hanging past the
+            # HF Space proxy limit — fail fast and surface a retryable error.
             self.client = InferenceClient(
                 model=model,
-                token=self.api_token
+                token=self.api_token,
+                timeout=45,
             )
         else:
             print("[LLMClient] HF_TOKEN missing; running in fallback mode.", flush=True)
@@ -90,14 +93,22 @@ EVIDENCE BLOCKS:
             }
 
         try:
-            response = self.client.chat_completion(
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": full_prompt}
-                ],
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-            )
+            response = None
+            for attempt in (1, 2):
+                try:
+                    response = self.client.chat_completion(
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": full_prompt}
+                        ],
+                        temperature=self.temperature,
+                        max_tokens=self.max_tokens,
+                    )
+                    break
+                except Exception as retry_err:
+                    if attempt == 2:
+                        raise
+                    print("HF RETRY after error:", str(retry_err), flush=True)
 
             raw_text = response.choices[0].message.content.strip()
 

@@ -7,7 +7,9 @@ const finalBaseUrl = cleanApiUrl
   : '/api';
 
 const api = axios.create({
-  baseURL: finalBaseUrl
+  baseURL: finalBaseUrl,
+  // Without a timeout a held connection locks the chat UI forever.
+  timeout: 120000,
 })
 
 export const getCases = () => api.get('/cases')

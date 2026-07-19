@@ -51,9 +51,25 @@ _systems = {}
 _systems_lock = threading.Lock()
 
 # ── Lifespan ──────────────────────────────────────────────────────
+def _warm_start():
+    # Pay the lazy-init costs (model loading, LLM provider resolution)
+    # at boot instead of on the first user query, which otherwise can
+    # stall past the Space proxy timeout.
+    try:
+        s = get_systems()
+        client = s["pipeline"].llm_answerer.llm_client
+        if client.client is not None:
+            client.client.chat_completion(
+                messages=[{"role": "user", "content": "ping"}], max_tokens=1
+            )
+            print("[DIA-Legal] LLM route warmed.", flush=True)
+    except Exception as exc:
+        print(f"[DIA-Legal] Warm-up skipped: {exc}", flush=True)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("[DIA-Legal] Server starting...", flush=True)
+    threading.Thread(target=_warm_start, daemon=True).start()
     yield
     print("[DIA-Legal] Shutdown.", flush=True)
 
